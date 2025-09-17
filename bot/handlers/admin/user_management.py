@@ -44,11 +44,15 @@ async def user_management_menu_handler(callback: types.CallbackQuery,
             prompt_text,
             reply_markup=get_back_to_admin_panel_keyboard(current_lang, i18n)
         )
+        await callback.message.edit_text(
+            prompt_text,
+            reply_markup=get_user_management_keyboard(i18n, current_lang)  # ← ДОЛЖНО БЫТЬ ТАК
+        )
     except Exception as e:
         logging.warning(f"Could not edit message for user management: {e}. Sending new.")
-        await callback.message.answer(
+        await callback.message.edit_text(
             prompt_text,
-            reply_markup=get_back_to_admin_panel_keyboard(current_lang, i18n)
+            reply_markup=get_user_management_keyboard(i18n, current_lang)  # ← ДОЛЖНО БЫТЬ ТАК
         )
     
     await callback.answer()
