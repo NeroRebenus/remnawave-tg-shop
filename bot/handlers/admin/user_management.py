@@ -12,7 +12,10 @@ from config.settings import Settings
 from db.dal import user_dal, subscription_dal, message_log_dal
 from db.models import User
 from bot.states.admin_states import AdminStates
-from bot.keyboards.inline.admin_keyboards import get_back_to_admin_panel_keyboard
+from bot.keyboards.inline.admin_keyboards import (
+    get_back_to_admin_panel_keyboard,
+    get_user_management_keyboard
+)
 from bot.services.subscription_service import SubscriptionService
 from bot.services.panel_api_service import PanelApiService
 from bot.middlewares.i18n import JsonI18n
@@ -42,17 +45,13 @@ async def user_management_menu_handler(callback: types.CallbackQuery,
     try:
         await callback.message.edit_text(
             prompt_text,
-            reply_markup=get_back_to_admin_panel_keyboard(current_lang, i18n)
-        )
-        await callback.message.edit_text(
-            prompt_text,
-            reply_markup=get_user_management_keyboard(i18n, current_lang)  # ← ДОЛЖНО БЫТЬ ТАК
+            reply_markup=get_user_management_keyboard(i18n, current_lang)
         )
     except Exception as e:
         logging.warning(f"Could not edit message for user management: {e}. Sending new.")
         await callback.message.edit_text(
             prompt_text,
-            reply_markup=get_user_management_keyboard(i18n, current_lang)  # ← ДОЛЖНО БЫТЬ ТАК
+            reply_markup=get_user_management_keyboard(i18n, current_lang)
         )
     
     await callback.answer()
