@@ -24,7 +24,6 @@ def build_root_router(settings: Settings) -> Router:
     admin_main_router.message.filter(admin_filter_instance)
     admin_main_router.callback_query.filter(admin_filter_instance)
     admin_main_router.include_router(admin_router_aggregate)
-    admin_main_router.include_router(user_price.router)
     root.include_router(admin_main_router)
 
     return root
