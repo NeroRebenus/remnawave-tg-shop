@@ -5,8 +5,7 @@ from bot.handlers import inline_mode
 from bot.handlers.admin import admin_router_aggregate
 from bot.filters.admin_filter import AdminFilter
 from config.settings import Settings
-from bot.handlers.admin import user_price as admin_user_price
-
+from bot.handlers.admin import user_price
 
 def build_root_router(settings: Settings) -> Router:
     root = Router(name="root")
@@ -25,7 +24,7 @@ def build_root_router(settings: Settings) -> Router:
     admin_main_router.message.filter(admin_filter_instance)
     admin_main_router.callback_query.filter(admin_filter_instance)
     admin_main_router.include_router(admin_router_aggregate)
-    admin_main_router.include_router(admin_user_price.router)
+    admin_main_router.include_router(user_price.router)
     root.include_router(admin_main_router)
 
     return root

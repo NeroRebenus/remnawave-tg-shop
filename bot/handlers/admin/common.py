@@ -105,21 +105,14 @@ async def admin_panel_actions_callback_handler(
     # Добавлено: вход в сценарий изменения цены пользователя
     elif action == "user_price_plan":
         try:
-            from . import user_price_plan as admin_price_handlers
-            # Попробуем несколько возможных имён стартовой функции
-            entry = (
-                getattr(admin_price_handlers, "user_price_plan_start", None)
-                or getattr(admin_price_handlers, "start_user_price_plan_flow", None)
-                or getattr(admin_price_handlers, "price_plan_prompt_handler", None)
+            from . import user_price as admin_price_handlers
+            await admin_price_handlers.admin_user_price_prompt(
+                callback, state, i18n_data, settings
             )
-            if entry:
-                await entry(callback, state, i18n_data, settings, session)
-            else:
-                logging.error("user_price_plan handler entry function not found in admin/user_price_plan.py")
-                await callback.answer(_("admin_unknown_action"), show_alert=True)
         except Exception as e:
             logging.exception(f"Failed to start user price plan flow: {e}")
             await callback.answer(_("error_occurred_try_again"), show_alert=True)
+
 
     elif action == "view_banned":
         await admin_user_mgmnt_handlers.view_banned_users_handler(
@@ -199,6 +192,11 @@ async def admin_section_handler(callback: types.CallbackQuery, state: FSMContext
         elif section == "ban_management":
             await callback.message.edit_text(
                 _("admin_ban_management_section"),
+                reply_markup=get_ban_management_keyboard(i18n, current_lang)
+            )
+        elif section == "user_price_prompt":
+            await callback.message.edit_text(
+                _("admin_user_price_button"),
                 reply_markup=get_ban_management_keyboard(i18n, current_lang)
             )
         elif section == "promo_marketing":
