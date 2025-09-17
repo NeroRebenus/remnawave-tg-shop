@@ -101,6 +101,11 @@ async def admin_panel_actions_callback_handler(
         from . import user_management as admin_user_management_handlers
         await admin_user_management_handlers.user_management_menu_handler(
             callback, state, i18n_data, settings, session)
+    elif action == "user_price_plan":
+        from . import user_price as admin_price_handlers
+        await admin_price_handlers.admin_user_price_prompt(
+            callback, state, i18n_data, settings
+        )
 
     # Добавлено: вход в сценарий изменения цены пользователя
     elif action == "user_price_plan":
