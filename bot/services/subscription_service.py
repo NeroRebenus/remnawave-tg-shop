@@ -11,6 +11,7 @@ from db.models import User, Subscription
 
 from config.settings import Settings
 from .panel_api_service import PanelApiService
+from db.dal.pricing import get_effective_prices
 
 
 class SubscriptionService:
@@ -812,9 +813,18 @@ class SubscriptionService:
             return False
 
         months = sub.duration_months or 1
-        amount = self.settings.subscription_options.get(months)
-        if not amount:
-            logging.error(f"Auto-renew price missing for {months} months")
+
+        # Цена для автопродления — только из БД (UserPricePlan или дефолт из DAL)
+        try:
+            eff = await get_effective_prices(session, sub.user_id)
+        except Exception as e:
+            logging.error(f"Auto-renew: failed to load effective prices for user {sub.user_id}: {e}", exc_info=True)
+            return False
+
+        price_map = {1: eff.get("rub_1m"), 3: eff.get("rub_3m"), 6: eff.get("rub_6m"), 12: eff.get("rub_12m")}
+        amount_int = price_map.get(months)
+        if not amount_int:
+            logging.error(f"Auto-renew price missing for user {sub.user_id}, months={months}")
             return False
 
         metadata = {
@@ -823,7 +833,7 @@ class SubscriptionService:
             "subscription_months": str(months),
         }
         resp = await yk.create_payment(
-            amount=float(amount),
+            amount=float(amount_int),
             currency="RUB",
             description=f"Auto-renewal for {months} months",
             metadata=metadata,

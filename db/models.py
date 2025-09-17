@@ -45,6 +45,14 @@ class User(Base):
         back_populates="target_user",
         cascade="all, delete-orphan")
 
+    # Персональные цены пользователя (снимок цен 1/3/6/12 мес)
+    price_plan = relationship(
+        "UserPricePlan",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+
     def __repr__(self):
         return f"<User(user_id={self.user_id}, username='{self.username}')>"
 
@@ -126,6 +134,7 @@ class UserBilling(Base):
 
     user = relationship("User")
 
+
 class UserPaymentMethod(Base):
     __tablename__ = "user_payment_methods"
 
@@ -143,6 +152,7 @@ class UserPaymentMethod(Base):
     __table_args__ = (
         UniqueConstraint('user_id', 'provider_payment_method_id', name='uq_user_provider_method'),
     )
+
 
 class PromoCode(Base):
     __tablename__ = "promo_codes"
@@ -259,3 +269,35 @@ class AdAttribution(Base):
 
     user = relationship("User")
     campaign = relationship("AdCampaign", back_populates="attributions")
+
+
+# Новая таблица: персональные цены по пользователю
+class UserPricePlan(Base):
+    __tablename__ = "user_price_plan"
+
+    # PK = user_id, связь 1:1 с users
+    user_id = Column(BigInteger, ForeignKey("users.user_id", ondelete="CASCADE"), primary_key=True)
+
+    rub_1m = Column(Integer, nullable=False)
+    rub_3m = Column(Integer, nullable=False)
+    rub_6m = Column(Integer, nullable=False)
+    rub_12m = Column(Integer, nullable=False)
+
+    stars_1m = Column(Integer, nullable=True)
+    stars_3m = Column(Integer, nullable=True)
+    stars_6m = Column(Integer, nullable=True)
+    stars_12m = Column(Integer, nullable=True)
+
+    created_by_admin_id = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+
+    user = relationship("User", back_populates="price_plan", uselist=False)
+
+    def __repr__(self):
+        return (
+            f"<UserPricePlan(user_id={self.user_id}, "
+            f"rub=[{self.rub_1m},{self.rub_3m},{self.rub_6m},{self.rub_12m}], "
+            f"stars=[{self.stars_1m},{self.stars_3m},{self.stars_6m},{self.stars_12m}]"
+            f")>"
+        )

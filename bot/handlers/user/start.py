@@ -2,13 +2,14 @@ import logging
 import re
 from aiogram import Router, F, types, Bot
 from aiogram.utils.text_decorations import html_decoration as hd
-from aiogram.filters import CommandStart, Command
+from aiagram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from typing import Optional, Union
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
 
 from db.dal import user_dal
+from db.dal.pricing import get_or_init_user_price_plan
 
 from bot.keyboards.inline.user_keyboards import get_main_menu_inline_keyboard, get_language_selection_keyboard
 from bot.services.subscription_service import SubscriptionService
@@ -170,6 +171,9 @@ async def start_command_handler(message: types.Message,
                 logging.info(
                     f"New user {user_id} added to session. Referred by: {referred_by_user_id or 'N/A'}."
                 )
+                            
+                await get_or_init_user_price_plan(session, user_id=user_id)
+                await session.flush()  # commit не обязателен, останемся в текущей транзакции
 
                 # Send notification about new user registration
                 try:
@@ -222,6 +226,10 @@ async def start_command_handler(message: types.Message,
                 logging.error(
                     f"Failed to update existing user {user_id} in session: {e_update}",
                     exc_info=True)
+
+        await get_or_init_user_price_plan(session, user_id=user_id)
+        await session.flush()
+
 
     # Attribute user to ad campaign if start param provided
     if ad_start_param:

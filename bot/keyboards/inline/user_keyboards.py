@@ -116,19 +116,23 @@ def get_payment_method_keyboard(months: int, price: float,
                                 stars_price: Optional[int],
                                 currency_symbol_val: str, lang: str,
                                 i18n_instance, settings: Settings) -> InlineKeyboardMarkup:
+    """
+    price и stars_price используются только для текста на кнопках/логики показа.
+    В callback мы теперь передаём ТОЛЬКО months — сама цена подтягивается на сервере из БД.
+    """
     _ = lambda key, **kwargs: i18n_instance.gettext(lang, key, **kwargs)
     builder = InlineKeyboardBuilder()
     if settings.STARS_ENABLED and stars_price is not None:
         builder.button(text=_("pay_with_stars_button"),
-                       callback_data=f"pay_stars:{months}:{stars_price}")
+                       callback_data=f"pay_stars:{months}")  # ⬅️ без цены
     if settings.TRIBUTE_ENABLED and tribute_url:
         builder.button(text=_("pay_with_tribute_button"), url=tribute_url)
     if settings.YOOKASSA_ENABLED:
         builder.button(text=_("pay_with_yookassa_button"),
-                       callback_data=f"pay_yk:{months}:{price}")
+                       callback_data=f"pay_yk:{months}")  # ⬅️ без цены
     if settings.CRYPTOPAY_ENABLED:
         builder.button(text=_("pay_with_cryptopay_button"),
-                       callback_data=f"pay_crypto:{months}:{price}")
+                       callback_data=f"pay_crypto:{months}")  # ⬅️ без цены
     builder.button(text=_(key="cancel_button"),
                    callback_data="main_action:subscribe")
     builder.adjust(1)

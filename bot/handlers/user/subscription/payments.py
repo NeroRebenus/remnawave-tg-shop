@@ -10,8 +10,19 @@ from bot.services.crypto_pay_service import CryptoPayService
 from bot.services.stars_service import StarsService
 from bot.middlewares.i18n import JsonI18n
 from db.dal import payment_dal, user_billing_dal
+from db.dal.pricing import get_effective_prices
 
 router = Router(name="user_subscription_payments_router")
+
+
+def _rub_for_months(eff: dict, months: int) -> Optional[int]:
+    mapping = {1: eff.get("rub_1m"), 3: eff.get("rub_3m"), 6: eff.get("rub_6m"), 12: eff.get("rub_12m")}
+    return mapping.get(months)
+
+
+def _stars_for_months(eff: dict, months: int) -> Optional[int]:
+    mapping = {1: eff.get("stars_1m"), 3: eff.get("stars_3m"), 6: eff.get("stars_6m"), 12: eff.get("stars_12m")}
+    return mapping.get(months)
 
 
 @router.callback_query(F.data.startswith("subscribe_period:"))
@@ -37,26 +48,37 @@ async def select_subscription_period_callback_handler(callback: types.CallbackQu
             pass
         return
 
-    price_rub = settings.subscription_options.get(months)
-    if price_rub is None:
-        logging.error(
-            f"Price not found for {months} months subscription period in settings.subscription_options."
-        )
+    # 👇 Цена из БД для конкретного пользователя
+    user_id = callback.from_user.id
+    try:
+        eff = await get_effective_prices(session, user_id)
+    except Exception as e:
+        logging.error(f"Failed to load effective prices for user {user_id}: {e}", exc_info=True)
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)
         except Exception:
             pass
         return
 
+    price_rub = _rub_for_months(eff, months)
+    if price_rub is None:
+        logging.error(f"RUB price not found for {months}m in user plan of {user_id}")
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+
+    stars_price = _stars_for_months(eff, months)
     currency_symbol_val = settings.DEFAULT_CURRENCY_SYMBOL
     text_content = get_text("choose_payment_method")
+
     tribute_url = settings.tribute_payment_links.get(months)
-    stars_price = settings.stars_subscription_options.get(months)
     reply_markup = get_payment_method_keyboard(
         months,
-        price_rub,
+        float(price_rub),   # можем отдать float для сервисов оплаты
         tribute_url,
-        stars_price,
+        stars_price,        # может быть None — тогда кнопка Stars не покажется
         currency_symbol_val,
         current_lang,
         i18n,
@@ -99,11 +121,10 @@ async def pay_yk_callback_handler(callback: types.CallbackQuery, settings: Setti
             pass
         return
 
+    # 👇 Теперь в колбэке передаём только months
     try:
-        _, data_payload = callback.data.split(":", 1)
-        months_str, price_str = data_payload.split(":")
+        _, months_str = callback.data.split(":", 1)
         months = int(months_str)
-        price_rub = float(price_str)
     except (ValueError, IndexError):
         logging.error(f"Invalid pay_yk data in callback: {callback.data}")
         try:
@@ -113,6 +134,26 @@ async def pay_yk_callback_handler(callback: types.CallbackQuery, settings: Setti
         return
 
     user_id = callback.from_user.id
+    # Авторитетная цена — только из БД, а не из callback
+    try:
+        eff = await get_effective_prices(session, user_id)
+    except Exception as e:
+        logging.error(f"Failed to load effective prices for user {user_id}: {e}", exc_info=True)
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+    price_rub_int = _rub_for_months(eff, months)
+    if price_rub_int is None:
+        logging.error(f"RUB price not found for {months}m for user {user_id}")
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+    price_rub = float(price_rub_int)
+
     payment_description = get_text("payment_description_subscription", months=months)
     currency_code_for_yk = "RUB"
 
@@ -287,11 +328,10 @@ async def pay_crypto_callback_handler(
             pass
         return
 
+    # 👇 Теперь в колбэке передаём только months
     try:
-        _, data_payload = callback.data.split(":", 1)
-        months_str, price_str = data_payload.split(":")
+        _, months_str = callback.data.split(":", 1)
         months = int(months_str)
-        price_amount = float(price_str)
     except (ValueError, IndexError):
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)
@@ -300,6 +340,26 @@ async def pay_crypto_callback_handler(
         return
 
     user_id = callback.from_user.id
+
+    # Цена из БД (не доверяем callback)
+    try:
+        eff = await get_effective_prices(session, user_id)
+    except Exception as e:
+        logging.error(f"Failed to load effective prices for user {user_id}: {e}", exc_info=True)
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+    price_rub_int = _rub_for_months(eff, months)
+    if price_rub_int is None:
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+    price_amount = float(price_rub_int)
+
     payment_description = get_text("payment_description_subscription", months=months)
 
     invoice_url = await cryptopay_service.create_invoice(
@@ -364,11 +424,10 @@ async def pay_stars_callback_handler(
             pass
         return
 
+    # 👇 Теперь в колбэке передаём только months
     try:
-        _, data_payload = callback.data.split(":", 1)
-        months_str, stars_price_str = data_payload.split(":")
+        _, months_str = callback.data.split(":", 1)
         months = int(months_str)
-        stars_price = int(stars_price_str)
     except (ValueError, IndexError):
         try:
             await callback.answer(get_text("error_try_again"), show_alert=True)
@@ -377,6 +436,25 @@ async def pay_stars_callback_handler(
         return
 
     user_id = callback.from_user.id
+
+    # Цена в Stars — из БД
+    try:
+        eff = await get_effective_prices(session, user_id)
+    except Exception as e:
+        logging.error(f"Failed to load effective prices for user {user_id}: {e}", exc_info=True)
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+    stars_price = _stars_for_months(eff, months)
+    if stars_price is None:
+        try:
+            await callback.answer(get_text("error_try_again"), show_alert=True)
+        except Exception:
+            pass
+        return
+
     payment_description = get_text("payment_description_subscription", months=months)
 
     payment_db_id = await stars_service.create_invoice(
@@ -435,4 +513,3 @@ async def handle_successful_stars_payment(
         stars_amount=stars_amount,
         i18n_data=i18n_data,
     )
-

@@ -62,10 +62,15 @@ def get_user_management_keyboard(i18n_instance, lang: str) -> InlineKeyboardMark
                    callback_data="admin_action:users_management")
     builder.button(text=_(key="admin_ban_management_section"),
                    callback_data="admin_section:ban_management")
+
+    # 🔹 Новая кнопка: редактирование индивидуальной цены пользователя
+    # Колбэк запускает сценарий ввода user_id и последующего редактирования цен 1/3/6/12 мес
+    builder.button(text=_(key="admin_user_price_button", default="💰 Цена пользователя"),
+                   callback_data="admin_action:user_price_prompt")
     
     builder.button(text=_(key="back_to_admin_panel_button"),
                    callback_data="admin_action:main")
-    builder.adjust(2, 1)
+    builder.adjust(2, 1, 1)
     return builder.as_markup()
 
 

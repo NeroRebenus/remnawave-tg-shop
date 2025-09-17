@@ -10,6 +10,8 @@ from bot.services.referral_service import ReferralService
 from bot.keyboards.inline.user_keyboards import get_back_to_main_menu_markup
 from bot.middlewares.i18n import JsonI18n
 
+from db.dal.pricing import get_effective_prices
+
 router = Router(name="user_referral_router")
 
 
@@ -63,22 +65,36 @@ async def referral_command_handler(event: Union[types.Message,
     referral_link = referral_service.generate_referral_link(
         bot_username, inviter_user_id)
 
+    # ---- ПЕРСОНАЛЬНЫЕ ПЕРИОДЫ ИЗ БД (fallback на .env) ----
+    months_available = []
+    try:
+        eff = await get_effective_prices(session, inviter_user_id)
+        # считаем период доступным, если есть цена в рублях
+        key_map = {1: "rub_1m", 3: "rub_3m", 6: "rub_6m", 12: "rub_12m"}
+        for m, k in key_map.items():
+            if eff.get(k) is not None:
+                months_available.append(m)
+    except Exception as e:
+        logging.exception(f"Failed to load effective prices for user {inviter_user_id}: {e}")
+
+    if not months_available and settings.subscription_options:
+        # Фолбэк: возьмём периоды из .env, если DAL ничего не дал
+        months_available = sorted(settings.subscription_options.keys())
+
+    # ---- Текст о бонусах за рефералку по доступным периодам ----
     bonus_info_parts = []
-    if settings.subscription_options:
-
-        for months_period_key, _price in sorted(
-                settings.subscription_options.items()):
-
-            inv_bonus = settings.referral_bonus_inviter.get(months_period_key)
-            ref_bonus = settings.referral_bonus_referee.get(months_period_key)
-            if inv_bonus is not None or ref_bonus is not None:
-                bonus_info_parts.append(
-                    _("referral_bonus_per_period",
-                      months=months_period_key,
-                      inviter_bonus_days=inv_bonus
-                      if inv_bonus is not None else _("no_bonus_placeholder"),
-                      referee_bonus_days=ref_bonus
-                      if ref_bonus is not None else _("no_bonus_placeholder")))
+    for months_period_key in sorted(months_available):
+        inv_bonus = settings.referral_bonus_inviter.get(months_period_key)
+        ref_bonus = settings.referral_bonus_referee.get(months_period_key)
+        if inv_bonus is not None or ref_bonus is not None:
+            bonus_info_parts.append(
+                _("referral_bonus_per_period",
+                  months=months_period_key,
+                  inviter_bonus_days=inv_bonus
+                  if inv_bonus is not None else _("no_bonus_placeholder"),
+                  referee_bonus_days=ref_bonus
+                  if ref_bonus is not None else _("no_bonus_placeholder"))
+            )
 
     bonus_details_str = "\n".join(bonus_info_parts) if bonus_info_parts else _(
         "referral_no_bonuses_configured")

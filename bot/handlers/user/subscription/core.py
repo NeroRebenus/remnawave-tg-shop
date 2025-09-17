@@ -2,7 +2,7 @@ import logging
 from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from typing import Optional, Union
+from typing import Optional, Union, Dict
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -18,6 +18,7 @@ from bot.services.panel_api_service import PanelApiService
 from bot.middlewares.i18n import JsonI18n
 from db.dal import subscription_dal
 from db.models import Subscription
+from db.dal.pricing import get_effective_prices
 
 router = Router(name="user_subscription_core_router")
 
@@ -39,12 +40,29 @@ async def display_subscription_options(event: Union[types.Message, types.Callbac
             await event.answer(err_msg)
         return
 
+    # персональные цены из БД (UserPricePlan -> иначе дефолты из .env внутри DAL)
+    user_id = (event.from_user.id if isinstance(event, (types.Message, types.CallbackQuery)) else None)
+    sub_options: Dict[int, Optional[int]] = {}
+    try:
+        eff = await get_effective_prices(session, user_id)
+        mapping = [(1, "rub_1m"), (3, "rub_3m"), (6, "rub_6m"), (12, "rub_12m")]
+        for months, key in mapping:
+            val = eff.get(key)
+            if val is not None:
+                sub_options[months] = val
+    except Exception as e:
+        logging.exception(f"Failed to load effective prices for user {user_id}: {e}")
+
+    # safety fallback (на случай, если DAL вернул пусто — не должно, но пусть будет)
+    if not sub_options and settings.subscription_options:
+        sub_options = {k: v for k, v in settings.subscription_options.items() if v is not None}
+
     currency_symbol_val = settings.DEFAULT_CURRENCY_SYMBOL
-    text_content = get_text("select_subscription_period") if settings.subscription_options else get_text("no_subscription_options_available")
+    text_content = get_text("select_subscription_period") if sub_options else get_text("no_subscription_options_available")
 
     reply_markup = (
-        get_subscription_options_keyboard(settings.subscription_options, currency_symbol_val, current_lang, i18n)
-        if settings.subscription_options
+        get_subscription_options_keyboard(sub_options, currency_symbol_val, current_lang, i18n)
+        if sub_options
         else get_back_to_main_menu_markup(current_lang, i18n)
     )
 
@@ -216,6 +234,11 @@ async def my_subscription_command_handler(
         await target.answer(text + tribute_hint, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
 
+@router.callback_query(F.data == "main_action:subscribe")
+async def reshow_subscription_options_callback(callback: types.CallbackQuery, i18n_data: dict, settings: Settings, session: AsyncSession):
+    await display_subscription_options(callback, i18n_data, settings, session)
+
+
 @router.callback_query(F.data.startswith("toggle_autorenew:"))
 async def toggle_autorenew_handler(
     callback: types.CallbackQuery,
@@ -359,5 +382,3 @@ async def connect_command_handler(
 ):
     logging.info(f"User {message.from_user.id} used /connect command.")
     await my_subscription_command_handler(message, i18n_data, settings, panel_service, subscription_service, session, bot)
-
-
