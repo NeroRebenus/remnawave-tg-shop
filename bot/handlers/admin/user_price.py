@@ -57,7 +57,6 @@ def _parse_prices(s: str) -> Dict[str, int]:
     return result
 
 
-@router.callback_query(F.data == "admin_action:user_price_prompt")
 async def admin_user_price_prompt(
     cb: types.CallbackQuery,
     state: FSMContext,
