@@ -2,7 +2,7 @@ import logging
 import re
 from aiogram import Router, F, types, Bot
 from aiogram.utils.text_decorations import html_decoration as hd
-from aiagram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from typing import Optional, Union
 from sqlalchemy.ext.asyncio import AsyncSession
