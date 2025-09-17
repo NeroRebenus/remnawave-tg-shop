@@ -49,10 +49,11 @@ async def user_management_menu_handler(callback: types.CallbackQuery,
         )
     except Exception as e:
         logging.warning(f"Could not edit message for user management: {e}. Sending new.")
-        await callback.message.edit_text(
+        await callback.message.answer(
             prompt_text,
             reply_markup=get_user_management_keyboard(i18n, current_lang)
         )
+
     
     await callback.answer()
     await state.set_state(AdminStates.waiting_for_user_search)

@@ -72,6 +72,7 @@ async def admin_panel_actions_callback_handler(
         await callback.answer("Error processing action: message context lost.",
                               show_alert=True)
         return
+    logging.warning(f"ADMIN ACTION RAW CALLBACK: {callback.data}")
 
     if action == "stats":
         await admin_stats_handlers.show_statistics_handler(
