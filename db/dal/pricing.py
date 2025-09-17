@@ -2,7 +2,7 @@ from typing import Literal, TypedDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.Settings import Settings
+from config.settings import Settings
 from db.models import UserPricePlan
 
 Period = Literal["1m", "3m", "6m", "12m"]
