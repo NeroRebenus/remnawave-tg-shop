@@ -83,6 +83,7 @@
   "admin_system_functions_section": "⚙️ System",
   "admin_ban_management_section": "🚫 Bans",
   "admin_users_management_button": "👤 Management",
+  "admin_user_price_button" : "💰 User Price",
   "back_to_user_management_button": "⬅️ To Users",
   "back_to_admin_panel_button": "⬅️ To Admin",
   "admin_stats_header": "📊 Bot Statistics",

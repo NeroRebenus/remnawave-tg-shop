@@ -83,6 +83,7 @@
   "admin_system_functions_section": "⚙️ Система",
   "admin_ban_management_section": "🚫 Блокировки",
   "admin_users_management_button": "👤 Управление",
+  "admin_user_price_button" : "💰 Цена пользователя",
   "back_to_user_management_button": "⬅️ К пользователям",
   "back_to_admin_panel_button": "⬅️ В админку",
   "admin_stats_header": "📊 Статистика Бота",
