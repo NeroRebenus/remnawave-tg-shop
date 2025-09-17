@@ -30,19 +30,20 @@ def _defaults_from_env() -> Dict[str, Optional[int]]:
         "stars_6m": stars.get(6),
         "stars_12m": stars.get(12),
     }
-async def get_or_init_user_price_plan(session: AsyncSession, user_id: int) -> UserPricePlan:
-    # если есть — вернуть
-    q = await session.execute(select(UserPricePlan).where(UserPricePlan.user_id == user_id))
-    plan = q.scalar_one_or_none()
+async def get_or_init_user_price_plan(session: AsyncSession, user_id: int, *, created_by_admin_id: int | None = None) -> UserPricePlan:
+    plan = await session.scalar(select(UserPricePlan).where(UserPricePlan.user_id == user_id))
     if plan:
         return plan
 
-    # если нет — создать из env-дефолтов
     d = _defaults_from_env()
-    stmt = insert(UserPricePlan).values(user_id=user_id, **d).returning(UserPricePlan)
-    res = await session.execute(stmt)
-    plan = res.scalar_one()
-    # коммит снаружи (вы уже делаете commit в обработчике)
+    plan = UserPricePlan(
+        user_id=user_id,
+        rub_1m=d["rub_1m"], rub_3m=d["rub_3m"], rub_6m=d["rub_6m"], rub_12m=d["rub_12m"],
+        stars_1m=d["stars_1m"], stars_3m=d["stars_3m"], stars_6m=d["stars_6m"], stars_12m=d["stars_12m"],
+        created_by_admin_id=created_by_admin_id,
+    )
+    session.add(plan)
+    await session.flush()
     return plan
 
 async def update_user_price_plan(
