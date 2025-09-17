@@ -1,10 +1,17 @@
-# db/dal/pricing.py
-
-from typing import Dict, Optional
+from typing import Literal, TypedDict
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from config.settings import Settings
-from db.models import UserPricePlan  # или ваша модель
+from db.models import UserPricePlan
+from typing import Dict, Optional
 from sqlalchemy import select, update, insert
+
+Period = Literal["1m", "3m", "6m", "12m"]
+
+class EffectivePrices(TypedDict):
+    rub_1m: int; rub_3m: int; rub_6m: int; rub_12m: int
+    stars_1m: int | None; stars_3m: int | None; stars_6m: int | None; stars_12m: int | None
 
 def _defaults_from_env() -> Dict[str, Optional[int]]:
     """
@@ -23,7 +30,6 @@ def _defaults_from_env() -> Dict[str, Optional[int]]:
         "stars_6m": stars.get(6),
         "stars_12m": stars.get(12),
     }
-
 async def get_or_init_user_price_plan(session: AsyncSession, user_id: int) -> UserPricePlan:
     # если есть — вернуть
     q = await session.execute(select(UserPricePlan).where(UserPricePlan.user_id == user_id))
@@ -62,3 +68,26 @@ async def update_user_price_plan(
         res = await session.execute(stmt)
         plan = res.scalar_one()
     return plan
+
+async def get_effective_prices(session: AsyncSession, user_id: int) -> EffectivePrices:
+    """
+    Возвращает «эффективные» цены: значения из UserPricePlan,
+    а если какое-то поле отсутствует/None — подставляет дефолт из .env.
+    """
+    plan = await get_or_init_user_price_plan(session, user_id)
+    defaults = _defaults_from_env()
+
+    def pick(db_val, key: str):
+        # Берём значение из плана, иначе дефолт из .env
+        return db_val if db_val is not None else defaults[key]
+
+    return EffectivePrices(
+        rub_1m=pick(plan.rub_1m,  "rub_1m"),
+        rub_3m=pick(plan.rub_3m,  "rub_3m"),
+        rub_6m=pick(plan.rub_6m,  "rub_6m"),
+        rub_12m=pick(plan.rub_12m, "rub_12m"),
+        stars_1m=pick(plan.stars_1m,  "stars_1m"),
+        stars_3m=pick(plan.stars_3m,  "stars_3m"),
+        stars_6m=pick(plan.stars_6m,  "stars_6m"),
+        stars_12m=pick(plan.stars_12m, "stars_12m"),
+    )
