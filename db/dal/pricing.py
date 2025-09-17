@@ -49,26 +49,25 @@ async def get_or_init_user_price_plan(session: AsyncSession, user_id: int, *, cr
 async def update_user_price_plan(
     session: AsyncSession,
     user_id: int,
-    created_by_admin_id: Optional[int] = None,
-    **fields: int,
+    *,
+    rub_1m: int | None = None, rub_3m: int | None = None, rub_6m: int | None = None, rub_12m: int | None = None,
+    stars_1m: int | None = None, stars_3m: int | None = None, stars_6m: int | None = None, stars_12m: int | None = None,
+    created_by_admin_id: int | None = None,
 ) -> UserPricePlan:
-    q = await session.execute(select(UserPricePlan).where(UserPricePlan.user_id == user_id))
-    plan = q.scalar_one_or_none()
-    if not plan:
-        # инициализируем дефолтами и позже обновим
-        plan = await get_or_init_user_price_plan(session, user_id)
+    plan = await get_or_init_user_price_plan(session, user_id, created_by_admin_id=created_by_admin_id)
+    if rub_1m is not None:  plan.rub_1m = rub_1m
+    if rub_3m is not None:  plan.rub_3m = rub_3m
+    if rub_6m is not None:  plan.rub_6m = rub_6m
+    if rub_12m is not None: plan.rub_12m = rub_12m
 
-    upd = {k: v for k, v in fields.items() if v is not None}
-    if upd:
-        stmt = (
-            update(UserPricePlan)
-            .where(UserPricePlan.user_id == user_id)
-            .values(**upd, updated_by_admin_id=created_by_admin_id)
-            .returning(UserPricePlan)
-        )
-        res = await session.execute(stmt)
-        plan = res.scalar_one()
+    if stars_1m is not None:  plan.stars_1m = stars_1m
+    if stars_3m is not None:  plan.stars_3m = stars_3m
+    if stars_6m is not None:  plan.stars_6m = stars_6m
+    if stars_12m is not None: plan.stars_12m = stars_12m
+
+    await session.flush()
     return plan
+
 
 async def get_effective_prices(session: AsyncSession, user_id: int) -> EffectivePrices:
     """
