@@ -101,8 +101,27 @@ async def admin_panel_actions_callback_handler(
         from . import user_management as admin_user_management_handlers
         await admin_user_management_handlers.user_management_menu_handler(
             callback, state, i18n_data, settings, session)
-    elif action == "view_banned":
 
+    # Добавлено: вход в сценарий изменения цены пользователя
+    elif action == "user_price_plan":
+        try:
+            from . import user_price_plan as admin_price_handlers
+            # Попробуем несколько возможных имён стартовой функции
+            entry = (
+                getattr(admin_price_handlers, "user_price_plan_start", None)
+                or getattr(admin_price_handlers, "start_user_price_plan_flow", None)
+                or getattr(admin_price_handlers, "price_plan_prompt_handler", None)
+            )
+            if entry:
+                await entry(callback, state, i18n_data, settings, session)
+            else:
+                logging.error("user_price_plan handler entry function not found in admin/user_price_plan.py")
+                await callback.answer(_("admin_unknown_action"), show_alert=True)
+        except Exception as e:
+            logging.exception(f"Failed to start user price plan flow: {e}")
+            await callback.answer(_("error_occurred_try_again"), show_alert=True)
+
+    elif action == "view_banned":
         await admin_user_mgmnt_handlers.view_banned_users_handler(
             callback, state, i18n_data, settings, session)
     elif action == "view_logs_menu":
@@ -112,7 +131,6 @@ async def admin_panel_actions_callback_handler(
         await admin_promo_manage_handlers.promo_management_handler(
             callback, i18n_data, settings, session)
     elif action == "sync_panel":
-
         await admin_sync_handlers.sync_command_handler(
             message_event=callback,
             bot=bot,
