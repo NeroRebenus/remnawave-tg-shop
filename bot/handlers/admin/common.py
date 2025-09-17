@@ -101,7 +101,7 @@ async def admin_panel_actions_callback_handler(
         from . import user_management as admin_user_management_handlers
         await admin_user_management_handlers.user_management_menu_handler(
             callback, state, i18n_data, settings, session)
-    elif action == "user_price_plan":
+    elif action == "user_price_prompt":
         from . import user_price as admin_price_handlers
         await admin_price_handlers.admin_user_price_prompt(
             callback, state, i18n_data, settings
@@ -184,11 +184,6 @@ async def admin_section_handler(callback: types.CallbackQuery, state: FSMContext
         elif section == "ban_management":
             await callback.message.edit_text(
                 _("admin_ban_management_section"),
-                reply_markup=get_ban_management_keyboard(i18n, current_lang)
-            )
-        elif section == "user_price_prompt":
-            await callback.message.edit_text(
-                _("admin_user_price_button"),
                 reply_markup=get_ban_management_keyboard(i18n, current_lang)
             )
         elif section == "promo_marketing":
