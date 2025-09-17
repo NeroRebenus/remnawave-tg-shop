@@ -2,7 +2,7 @@ from typing import Literal, TypedDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import settings
+from config.Settings import Settings
 from db.models import UserPricePlan
 
 Period = Literal["1m", "3m", "6m", "12m"]
@@ -13,14 +13,14 @@ class EffectivePrices(TypedDict):
 
 def _defaults_from_env() -> EffectivePrices:
     return EffectivePrices(
-        rub_1m=settings.RUB_PRICE_1_MONTH,
-        rub_3m=settings.RUB_PRICE_3_MONTHS,
-        rub_6m=settings.RUB_PRICE_6_MONTHS,
-        rub_12m=settings.RUB_PRICE_12_MONTHS,
-        stars_1m=getattr(settings, "STARS_PRICE_1_MONTH", None),
-        stars_3m=getattr(settings, "STARS_PRICE_3_MONTHS", None),
-        stars_6m=getattr(settings, "STARS_PRICE_6_MONTHS", None),
-        stars_12m=getattr(settings, "STARS_PRICE_12_MONTHS", None),
+        rub_1m=Settings.RUB_PRICE_1_MONTH,
+        rub_3m=Settings.RUB_PRICE_3_MONTHS,
+        rub_6m=Settings.RUB_PRICE_6_MONTHS,
+        rub_12m=Settings.RUB_PRICE_12_MONTHS,
+        stars_1m=getattr(Settings, "STARS_PRICE_1_MONTH", None),
+        stars_3m=getattr(Settings, "STARS_PRICE_3_MONTHS", None),
+        stars_6m=getattr(Settings, "STARS_PRICE_6_MONTHS", None),
+        stars_12m=getattr(Settings, "STARS_PRICE_12_MONTHS", None),
     )
 
 async def get_or_init_user_price_plan(session: AsyncSession, user_id: int, *, created_by_admin_id: int | None = None) -> UserPricePlan:
