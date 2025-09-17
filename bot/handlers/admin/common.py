@@ -106,19 +106,6 @@ async def admin_panel_actions_callback_handler(
         await admin_price_handlers.admin_user_price_prompt(
             callback, state, i18n_data, settings
         )
-
-    # Добавлено: вход в сценарий изменения цены пользователя
-    elif action == "user_price_plan":
-        try:
-            from . import user_price as admin_price_handlers
-            await admin_price_handlers.admin_user_price_prompt(
-                callback, state, i18n_data, settings
-            )
-        except Exception as e:
-            logging.exception(f"Failed to start user price plan flow: {e}")
-            await callback.answer(_("error_occurred_try_again"), show_alert=True)
-
-
     elif action == "view_banned":
         await admin_user_mgmnt_handlers.view_banned_users_handler(
             callback, state, i18n_data, settings, session)
