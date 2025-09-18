@@ -110,7 +110,7 @@ async def _show_price_menu(msg_or_cb: types.Message | types.CallbackQuery, i18n_
     plan = await get_or_init_user_price_plan(session, user_id=user_id)
     kb = await _price_menu_markup(i18n_data, settings, plan, user_id)
     _ = _t(i18n_data, settings)
-    title = _("admin_user_price_menu_title", default=f"⚙️ Цены пользователя {user_id}")
+    title = _("admin_user_price_menu_title", user_id = user_id)
     msg = msg_or_cb.message if isinstance(msg_or_cb, types.CallbackQuery) else msg_or_cb
     try:
         await msg.edit_text(title, reply_markup=kb)
