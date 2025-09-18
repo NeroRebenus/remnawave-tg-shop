@@ -66,6 +66,10 @@
   "referral_bonus_inviter_notification_new_sub": "🎉 Congrats! Your friend {referee_name} paid for a subscription. You received a {days}-day bonus subscription! It is active until {new_end_date}.",
   "user_is_banned": "🚫 Your account is banned. Please contact support.",
 
+  "admin_user_price_enter_query": "👤 Edit individual prices\n\n Enter <b>Telegram ID</b> or <b>@username</b> of the user.\n\n",
+  "admin_user_price_menu_title": "⚙️ Prices for user {user_id}",
+  "admin_user_price_section_rub": "💰 RUB",
+  "admin_user_price_section_stars": "⭐ Stars",
   "admin_panel_title": "Admin Panel",
   "admin_stats_button": "📊 Statistics",
   "admin_broadcast_button": "📢 Broadcast",
