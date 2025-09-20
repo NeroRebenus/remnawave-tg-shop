@@ -3,11 +3,13 @@ import ipaddress
 import logging
 import os
 from typing import List, Callable, Awaitable
+
 from aiohttp import web
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from db.repositories.receipts_repo import ReceiptsRepo
-from db.models import ReceiptStatus
+from db.models import ReceiptStatus, Payment
 
 log = logging.getLogger("webhook.ferma")
 
@@ -27,7 +29,8 @@ def _trusted_cidrs() -> List[ipaddress._BaseNetwork]:
     return nets
 
 def _ip_allowed(request: web.Request, cidrs: List[ipaddress._BaseNetwork]) -> bool:
-    if not cidrs:  # allow all if not set
+    # allow all if list пустой
+    if not cidrs:
         return True
     try:
         peer = request.transport.get_extra_info("peername")
@@ -72,16 +75,41 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker) -> Callable
                 # возможно, ретрай от Ferma по старому invoice_id — просто проигнорим
                 return web.json_response({"ok": True, "ignored": True, "reason": "unknown_invoice"})
 
-            if status_code == 2:          # CONFIRMED
+            if status_code == 2:  # CONFIRMED
+                # запомним, была ли ссылка ранее (чтобы избежать дублей сообщений)
+                already_had_url = bool(pr.ofd_receipt_url)
                 await repo.mark_confirmed(pr, ofd_url)
                 log.info("Ferma CONFIRMED: invoice_id=%s receipt_id=%s ofd=%s", invoice_id, receipt_id, ofd_url)
-            elif status_code == 1:        # PROCESSED
+
+                # 🧾 Попробуем отправить ссылку пользователю (если появилась впервые)
+                try:
+                    if ofd_url and not already_had_url:
+                        bot = request.app.get("bot")
+                        if bot is not None:
+                            # PaymentReceipt.payment_id == YooKassa payment.id
+                            q = await session.execute(
+                                select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
+                            )
+                            payment_row = q.scalars().first()
+                            if payment_row and payment_row.user_id:
+                                await bot.send_message(
+                                    chat_id=payment_row.user_id,
+                                    text=f"🧾 Ваш чек сформирован: {ofd_url}",
+                                    disable_web_page_preview=True,
+                                )
+                except Exception as e:
+                    # не валим обработку, просто логируем
+                    log.warning("Failed to notify user about receipt: %s", e, exc_info=True)
+
+            elif status_code == 1:  # PROCESSED
                 await repo.mark_processed(pr)
                 log.info("Ferma PROCESSED: invoice_id=%s receipt_id=%s", invoice_id, receipt_id)
-            elif status_code == 3:        # KKT_ERROR
+
+            elif status_code == 3:  # KKT_ERROR
                 await repo.mark_kkt_error(pr, error=str(payload))
                 log.warning("Ferma KKT_ERROR: invoice_id=%s receipt_id=%s payload=%s", invoice_id, receipt_id, payload)
-            else:                          # 0 NEW или иной
+
+            else:  # 0 NEW или иной
                 log.info("Ferma status=%s invoice_id=%s receipt_id=%s", status_code, invoice_id, receipt_id)
 
         return web.json_response({"ok": True})

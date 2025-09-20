@@ -5,10 +5,12 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any
 
+from aiogram import Bot
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from db.repositories.receipts_repo import ReceiptsRepo
-from db.models import ReceiptStatus
+from db.models import ReceiptStatus, Payment
 from bot.services.ferma_ofd_service import FermaClient, FermaError
 from config.settings import get_settings
 
@@ -170,15 +172,43 @@ async def _fallback_poll_status(
                     return
 
                 if status_code == 2:  # CONFIRMED
+                    # чтобы не слать дубль, проверим, была ли ссылка
+                    had_url_before = bool(pr.ofd_receipt_url)
                     await repo.mark_confirmed(pr, ofd_url)
                     log.info("Fallback confirmed: invoice_id=%s ofd=%s", invoice_id, ofd_url)
+
+                    # 🧾 Попробуем уведомить пользователя, если ссылка появилась впервые
+                    try:
+                        if ofd_url and not had_url_before:
+                            # Найдём платеж и пользователя по YK payment.id == PaymentReceipt.payment_id
+                            q = await session.execute(
+                                select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
+                            )
+                            payment_row = q.scalars().first()
+                            if payment_row and payment_row.user_id:
+                                s = get_settings()
+                                bot = Bot(token=s.BOT_TOKEN)
+                                try:
+                                    await bot.send_message(
+                                        chat_id=payment_row.user_id,
+                                        text=f"🧾 Ваш чек сформирован: {ofd_url}",
+                                        disable_web_page_preview=True,
+                                    )
+                                finally:
+                                    await bot.session.close()
+                    except Exception:
+                        log.exception("Fallback: failed to notify user about receipt")
+
                     return
+
                 elif status_code == 1:  # PROCESSED (в обработке)
                     await repo.mark_processed(pr)
+
                 elif status_code == 3:  # KKT_ERROR
                     await repo.mark_kkt_error(pr, error=str(data))
                     log.warning("Fallback KKT_ERROR: invoice_id=%s data=%s", invoice_id, data)
                     return
+
                 # status_code == 0 (NEW) или неизвестен — ждём дальше
 
             await asyncio.sleep(interval)

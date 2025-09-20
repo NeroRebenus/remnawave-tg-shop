@@ -1,22 +1,4 @@
 services:
-  remnawave-tg-shop:
-    # image: ghcr.io/machka-pasla/remnawave-tg-shop:latest
-    build: .
-    container_name: remnawave-tg-shop
-    hostname: remnawave-tg-shop
-    env_file:
-      - .env
-    networks:
-      - remnawave-network
-    volumes:
-      - ./locales:/app/locales
-    ports:
-      - "${WEB_SERVER_PORT:-8080}:${WEB_SERVER_PORT:-8080}"
-    restart: unless-stopped
-    depends_on:
-      remnawave-tg-shop-db:
-        condition: service_healthy
-
   remnawave-tg-shop-db:
     image: postgres:17
     container_name: remnawave-tg-shop-db
@@ -33,6 +15,41 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  # 👇 Новый сервис — запускает только миграции и завершается
+  migrator:
+    build: .
+    container_name: remnawave-tg-shop-migrator
+    hostname: remnawave-tg-shop-migrator
+    env_file:
+      - .env
+    # Если alembic у тебя синхронный — оставь psycopg2.
+    # Если настроен async alembic — команда может отличаться (alembic -x asyncio=true ...)
+    command: sh -c "alembic upgrade head"
+    networks:
+      - remnawave-network
+    depends_on:
+      remnawave-tg-shop-db:
+        condition: service_healthy
+    restart: "no"
+
+  remnawave-tg-shop:
+    build: .
+    container_name: remnawave-tg-shop
+    hostname: remnawave-tg-shop
+    env_file:
+      - .env
+    networks:
+      - remnawave-network
+    volumes:
+      - ./locales:/app/locales
+    ports:
+      - "${WEB_SERVER_PORT:-8080}:${WEB_SERVER_PORT:-8080}"
+    restart: unless-stopped
+    # ⬇️ Бот стартует ТОЛЬКО после успешного завершения мигратора
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
 
 networks:
   remnawave-network:
