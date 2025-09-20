@@ -186,27 +186,44 @@ class FermaClient:
         payment_identifiers: str | None = None,
     ) -> dict:
         """
-        Создаёт чек прихода в Ferma.
-
+        Создаёт чек прихода в Ferma (Type="Income").
         Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
+        # ВАЖНО: Ferma ждёт обобщённую структуру с корнем "Request"
+        # Минимальная "касса" без номенклатуры (одной суммой), Ferma это допускает.
+        # Если у тебя уже есть сборщик пэйлоада внутри клиента — используй его.
         payload = {
-            "InvoiceId": invoice_id,
-            "Amount": amount,
-            "Description": description,
-            "Customer": {
-                **({"Email": buyer_email} if buyer_email else {}),
-                **({"Phone": buyer_phone} if buyer_phone else {}),
-            },
-            **({"PaymentIdentifiers": [payment_identifiers]} if payment_identifiers else {}),
+            "Request": {
+                "Type": "Income",
+                "InvoiceId": invoice_id,               # твой id транзакции (идемпотентность)
+                "CustomerReceipt": {
+                    "Items": [
+                        {
+                            "Label": description or f"Оплата заказа {invoice_id}",
+                            "Price": amount,
+                            "Quantity": 1,
+                            "Amount": amount,
+                            "Vat": "None",             # подставь нужный НДС, если требуется
+                        }
+                    ],
+                    "TotalSum": amount,
+                    "Payments": [{"Type": 2, "Amount": amount}],  # 2 = безнал, см. твою конфигурацию
+                },
+                "Customer": {
+                    **({"Email": buyer_email} if buyer_email else {}),
+                    **({"Phone": buyer_phone} if buyer_phone else {}),
+                },
+                # Дополнительно можно отправлять Метаданные:
+                **({"Data": {"PaymentIdentifiers": [payment_identifiers]}} if payment_identifiers else {}),
+            }
         }
 
-        # _post_json требует use_token
-        resp = await self._post_json("/api/v1/receipt/income", payload, use_token=True)
+        # Правильный Ferma-эндпоинт
+        resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
 
         data = (resp or {}).get("Data") or resp or {}
         receipt_id = data.get("ReceiptId")
-        ferma_invoice_id = data.get("InvoiceId")
+        ferma_invoice_id = data.get("InvoiceId")  # может совпасть с твоим или быть нормализованным Ferma
 
         if not receipt_id:
             raise FermaError(f"Invalid response from Ferma: {resp}")
@@ -216,26 +233,22 @@ class FermaClient:
 
 
 
-    async def check_status(
-        self,
-        *,
-        invoice_id: Optional[str] = None,
-        receipt_id: Optional[str] = None
-    ) -> Dict[str, Any]:
+    async def check_status(self, *, invoice_id: str | None = None, receipt_id: str | None = None) -> dict:
         """
-        Запросить статус по invoice_id или receipt_id.
-        Возвращает Data из ответа Ferma.
+        POST /api/kkt/cloud/status — вернуть Data c полями StatusCode/Device.OfdReceiptUrl и т.п.
+        Можно передавать либо ReceiptId, либо InvoiceId (одно из них обязательно).
         """
-        await self._ensure_token()
-        req: Dict[str, Any] = {"Request": {}}
-        if invoice_id:
-            req["Request"]["InvoiceId"] = invoice_id
-        if receipt_id:
-            req["Request"]["ReceiptId"] = receipt_id
-        data = await self._post_json("/api/kkt/cloud/status", req, use_token=True)
-        if data.get("Status") != "Success":
-            raise FermaError(200, data)
-        return data.get("Data") or {}
+        if not invoice_id and not receipt_id:
+            raise FermaError("check_status requires either invoice_id or receipt_id")
+
+        payload = {
+            **({"InvoiceId": invoice_id} if invoice_id else {}),
+            **({"ReceiptId": receipt_id} if receipt_id else {}),
+        }
+        resp = await self._post_json("/api/kkt/cloud/status", payload, use_token=True)
+        data = (resp or {}).get("Data") or {}
+        return data
+
 
     # --------------------- build payload helpers ---------------------
 
