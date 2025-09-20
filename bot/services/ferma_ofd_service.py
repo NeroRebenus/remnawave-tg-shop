@@ -176,6 +176,7 @@ class FermaClient:
 
     # --------------------- public API ---------------------
 
+
     async def send_income_receipt(
         self,
         invoice_id: str,
@@ -186,17 +187,27 @@ class FermaClient:
         payment_identifiers: str | None = None,
     ) -> dict:
         """
-        Создаёт чек прихода в Ferma (Type="Income") через POST /api/kkt/cloud/receipt.
+        POST /api/kkt/cloud/receipt  (Ferma)
+        Формируем простой чек прихода (Type="Income").
         Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
-        s = self.cfg  # настройки клиента (из get_settings())
+        s = self.cfg  # настройки (get_settings)
 
-        # Собираем тело запроса ровно в формате Ferma (обязателен Request.Inn)
+        # --- строгая подготовка INN ---
+        inn = str(getattr(s, "FERMA_INN", "")).strip()
+        if not inn.isdigit() or len(inn) not in (10, 12):
+            raise FermaError(f"ENV FERMA_INN is invalid: {inn!r}")
+
+        # --- опциональная группа касс (на тесте часто нужна 555) ---
+        group_code = getattr(s, "FERMA_GROUP_CODE", None)
+        if group_code is not None:
+            group_code = str(group_code).strip() or None
+
+        # --- собираем CustomerReceipt ---
         customer_receipt = {
-            # Блок позиций — пробиваем одной позицией по всей сумме
             "Items": [
                 {
-                    "Label": description or f"Оплата заказа {invoice_id}",
+                    "Label": (description or f"Оплата заказа {invoice_id}")[:128],
                     "Price": float(amount),
                     "Quantity": 1,
                     "Amount": float(amount),
@@ -207,50 +218,56 @@ class FermaClient:
                 }
             ],
             "TotalSum": float(amount),
-            # Налогообложение и атрибуты чека (если заданы в ENV)
             "TaxationSystem": getattr(s, "FERMA_TAXATION_SYSTEM", None),
             "BillAddress": getattr(s, "FERMA_BILL_ADDRESS", None) or None,
             "Email": buyer_email or None,
             "Phone": buyer_phone or None,
-            # Интернет-торговля/ФА — передаём если явно указано
-            "KktFA": bool(str(getattr(s, "FERMA_KKT_FA", "")).lower() == "true") if hasattr(s, "FERMA_KKT_FA") else None,
         }
-
-        # Чистим None'ы — Ferma это любит
         customer_receipt = {k: v for k, v in customer_receipt.items() if v is not None}
 
+        # --- корневой Request ---
         request_obj = {
-            "Inn": getattr(s, "FERMA_INN", None),                      # << ОБЯЗАТЕЛЬНО!
+            "Inn": inn,
             "Type": "Income",
             "InvoiceId": invoice_id,
             "CustomerReceipt": customer_receipt,
             "CallbackUrl": (
-                getattr(s, "PUBLIC_BASE_URL", "").rstrip("/") + getattr(s, "FERMA_CALLBACK_PATH", "/webhook/ferma")
+                (getattr(s, "PUBLIC_BASE_URL", "").rstrip("/") + getattr(s, "FERMA_CALLBACK_PATH", "/webhook/ferma"))
                 if getattr(s, "PUBLIC_BASE_URL", None) else None
             ),
         }
+        if group_code:
+            request_obj["GroupCode"] = group_code  # ← важно для тестовой группы касс (555)
 
-        # Internet-признак вне CustomerReceipt — Ferma допускает оба, оставим доп. флаг:
+        # internet-флаг по желанию
         if str(getattr(s, "FERMA_IS_INTERNET", "false")).lower() == "true":
             request_obj["IsInternet"] = True
 
-        # Доп. поля-метки
         if payment_identifiers:
             request_obj["Data"] = {"PaymentIdentifiers": [payment_identifiers]}
 
         payload = {"Request": request_obj}
 
-        # Правильный путь Ferma (через авторизационный токен; self._post_json сам его подставит)
-        resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
+        # --- отладочный лог фактического тела запроса ---
+        try:
+            import json as _json
+            log.info("Ferma SEND receipt: inn=%s, group=%s, invoice=%s, amount=%.2f, payload=%s",
+                    inn, group_code, invoice_id, float(amount),
+                    _json.dumps(payload, ensure_ascii=False)[:1200])
+        except Exception:
+            pass
 
+        # --- вызов Ferma ---
+        resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
         data = (resp or {}).get("Data") or resp or {}
+
         receipt_id = data.get("ReceiptId")
         ferma_invoice_id = data.get("InvoiceId")
-
         if not receipt_id:
             raise FermaError(f"Invalid response from Ferma: {resp}")
 
         return {"receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
+
 
 
 
