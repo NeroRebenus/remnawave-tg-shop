@@ -7,7 +7,7 @@ from aiohttp import web
 from sqlalchemy.orm import sessionmaker
 
 from db.repositories.receipts_repo import ReceiptsRepo
-from db.models.receipts import ReceiptStatus
+from db.models import ReceiptStatus
 
 log = logging.getLogger("webhook.ferma")
 

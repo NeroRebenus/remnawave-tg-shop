@@ -59,7 +59,7 @@ async def on_startup_configured(dispatcher: Dispatcher):
     # --- FERMA: гарантируем, что таблица чеков создана до начала работы вебхуков
     try:
         from db.database_setup import async_engine as _engine_for_schema
-        from db.models.receipts import Base as _ReceiptsBase
+        from db.models import Base as _ReceiptsBase
         async with _engine_for_schema.begin() as conn:
             await conn.run_sync(_ReceiptsBase.metadata.create_all)
         logging.info("STARTUP: Receipts DB schema ensured (payment_receipts).")
