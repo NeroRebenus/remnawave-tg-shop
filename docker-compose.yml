@@ -16,21 +16,18 @@ services:
       timeout: 5s
       retries: 20
 
-  # 👇 Новый сервис — запускает только миграции и завершается
   migrator:
     build: .
     container_name: remnawave-tg-shop-migrator
     hostname: remnawave-tg-shop-migrator
     env_file:
       - .env
-    # Если alembic у тебя синхронный — оставь psycopg2.
-    # Если настроен async alembic — команда может отличаться (alembic -x asyncio=true ...)
-    command: sh -c "alembic upgrade head"
-    networks:
-      - remnawave-network
+    command: ["python", "-m", "scripts.migrator"]
     depends_on:
       remnawave-tg-shop-db:
         condition: service_healthy
+    networks:
+      - remnawave-network
     restart: "no"
 
   remnawave-tg-shop:
