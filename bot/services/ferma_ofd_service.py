@@ -132,9 +132,6 @@ class FermaClient:
         session: Optional[aiohttp.ClientSession] = None,
         settings: Optional["Settings"] = None,
     ):
-        inn_dbg = getattr(self.cfg, "FERMA_INN", None) or os.getenv("FERMA_INN")
-        log.info("FermaClient init: FERMA_BASE_URL=%s, FERMA_INN=%r",
-                 getattr(self.cfg, "FERMA_BASE_URL", None), inn_dbg)
         if cfg is not None:
             self.cfg = cfg
         else:
@@ -150,7 +147,9 @@ class FermaClient:
         self._session = session
         self._token: Optional[str] = None
         self._token_expiry: Optional[datetime] = None
-
+        inn_dbg = getattr(self.cfg, "FERMA_INN", None) or os.getenv("FERMA_INN")
+        log.info("FermaClient init: FERMA_BASE_URL=%s, FERMA_INN=%r",
+                 getattr(self.cfg, "FERMA_BASE_URL", None), inn_dbg)
     # --------------------- session/token helpers ---------------------
 
     async def _session_get(self) -> aiohttp.ClientSession:
