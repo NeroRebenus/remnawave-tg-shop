@@ -116,6 +116,8 @@ class FermaError(RuntimeError):
         self.http_status = http_status
         self.payload = payload
 
+import logging, os
+log = logging.getLogger("ferma.client")
 
 class FermaClient:
     """
@@ -130,6 +132,9 @@ class FermaClient:
         session: Optional[aiohttp.ClientSession] = None,
         settings: Optional["Settings"] = None,
     ):
+        inn_dbg = getattr(self.cfg, "FERMA_INN", None) or os.getenv("FERMA_INN")
+        log.info("FermaClient init: FERMA_BASE_URL=%s, FERMA_INN=%r",
+                 getattr(self.cfg, "FERMA_BASE_URL", None), inn_dbg)
         if cfg is not None:
             self.cfg = cfg
         else:
@@ -194,7 +199,13 @@ class FermaClient:
         s = self.cfg  # настройки (get_settings)
 
         # --- строгая подготовка INN ---
-        inn = str(getattr(s, "FERMA_INN", "")).strip()
+        inn = (str(getattr(s, "FERMA_INN", "")).strip()
+            or str(os.getenv("FERMA_INN", "")).strip())
+        if not inn.isdigit() or len(inn) not in (10, 12):
+            log.error("FERMA_INN is empty/invalid. Got: %r (settings=%r, env=%r)",
+                    inn, getattr(s, "FERMA_INN", None), os.getenv("FERMA_INN"))
+            raise FermaError(400, {"Status":"Failed","Error":{"Code":1007,"Message":f"ENV FERMA_INN is invalid: {inn!r}"}})
+
 
         if not inn.isdigit() or len(inn) not in (10, 12):
             # Лог + корректное формирование FermaError (status, payload)
