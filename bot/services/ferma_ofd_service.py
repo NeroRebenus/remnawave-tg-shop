@@ -176,41 +176,43 @@ class FermaClient:
 
     # --------------------- public API ---------------------
 
+    # Внутри класса FermaClient
     async def send_income_receipt(
         self,
-        *,
         invoice_id: str,
         amount: float,
         description: str,
-        buyer_email: Optional[str],
-        buyer_phone: Optional[str],
-        payment_identifiers: Optional[str] = None,
-        customer_name: Optional[str] = None,
-    ) -> str:
+        buyer_email: str | None = None,
+        buyer_phone: str | None = None,
+        payment_identifiers: str | None = None,
+    ) -> dict:
         """
-        Отправить чек типа "Income".
-        Возвращает ReceiptId.
+        Создаёт чек прихода в Ferma.
+
+        Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
-        await self._ensure_token()
-        items = [self._make_item(description, amount)]
-        payload = self._build_receipt_payload(
-            type_="Income",
-            invoice_id=invoice_id,
-            items=items,
-            amount=amount,
-            buyer_email=buyer_email,
-            buyer_phone=buyer_phone,
-            payment_identifiers=payment_identifiers or invoice_id,
-            customer_name=customer_name,
-        )
-        data = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
-        if data.get("Status") != "Success":
-            raise FermaError(200, data)
-        rid = (data.get("Data") or {}).get("ReceiptId")
-        if not rid:
-            raise FermaError(200, data)
-        log.info("Ferma receipt sent: invoice_id=%s receipt_id=%s", invoice_id, rid)
-        return rid
+        payload = {
+            "InvoiceId": invoice_id,
+            "Amount": amount,
+            "Description": description,
+            "Customer": {
+                **({"Email": buyer_email} if buyer_email else {}),
+                **({"Phone": buyer_phone} if buyer_phone else {}),
+            },
+            # Можно класть произвольный идентификатор платежа для удобной сверки
+            **({"PaymentIdentifiers": [payment_identifiers]} if payment_identifiers else {}),
+        }
+        resp = await self._post_json("/api/v1/receipt/income", json=payload)
+
+        data = (resp or {}).get("Data") or resp or {}
+        receipt_id = data.get("ReceiptId")
+        ferma_invoice_id = data.get("InvoiceId")  # может совпадать с тем, что передали, а может быть новым
+
+        if not receipt_id:
+            raise FermaError(f"Invalid response from Ferma: {resp}")
+
+        return {"receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
+
 
     async def check_status(
         self,
