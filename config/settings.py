@@ -422,6 +422,7 @@ class Settings(BaseSettings):
 _settings_instance: Optional[Settings] = None
 
 
+
 def get_settings() -> Settings:
     global _settings_instance
     if _settings_instance is None:
@@ -440,6 +441,17 @@ def get_settings() -> Settings:
                 logging.warning(
                     "CRITICAL: YooKassa credentials (SHOP_ID or SECRET_KEY) are not set. Payments will not work."
                 )
+            import os
+            ferma_env_dump = {k: os.getenv(k) for k in os.environ.keys() if k.startswith("FERMA_")}
+            logging.warning("DEBUG: env(FERMA_*)=%r", ferma_env_dump)
+            logging.warning(
+                "DEBUG: settings.FERMA_* base=%r login=%r inn=%r tax=%r tz=%r",
+                _settings_instance.FERMA_BASE_URL,
+                _settings_instance.FERMA_LOGIN,
+                _settings_instance.FERMA_INN,
+                _settings_instance.FERMA_TAXATION_SYSTEM,
+                _settings_instance.FERMA_TIMEZONE,
+            )
 
             # --- FERMA sanity checks ---
             if any([
