@@ -1,4 +1,3 @@
-# bot/services/ferma_webhook_service.py
 from __future__ import annotations
 import ipaddress
 import logging

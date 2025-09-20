@@ -1,4 +1,3 @@
-# bot/services/ferma_ofd_service.py
 from __future__ import annotations
 
 import asyncio

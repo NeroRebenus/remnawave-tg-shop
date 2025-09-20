@@ -1,9 +1,9 @@
+from __future__ import annotations
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger, Enum
 from sqlalchemy.orm import relationship, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.sql import func
 from datetime import datetime
-from __future__ import annotations
 from typing import Optional
 import enum
 
