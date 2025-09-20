@@ -6,9 +6,10 @@ import os
 from typing import List, Callable, Awaitable
 from aiohttp import web
 from sqlalchemy.orm import sessionmaker
-
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from db.dal import payment_dal, user_dal
 from db.repositories.receipts_repo import ReceiptsRepo
-from db.models.receipts import ReceiptStatus
+from db.models import ReceiptStatus
 
 log = logging.getLogger("webhook.ferma")
 
@@ -42,48 +43,69 @@ def _ip_allowed(request: web.Request, cidrs: List[ipaddress._BaseNetwork]) -> bo
 
 # --- Фабрика хендлера ДЛЯ app.router.add_post ---
 
-def make_ferma_callback_handler(async_session_factory: sessionmaker) -> Callable[[web.Request], Awaitable[web.Response]]:
-    """
-    Вернёт готовый aiohttp-хендлер под app.router.add_post(PATH, handler)
-    """
-    cidrs = _trusted_cidrs()
+def make_ferma_callback_handler(async_session_factory: sessionmaker):
+    async def _notify_user(session, bot: Bot, invoice_id: str, ofd_url: Optional[str]):
+        user_id: Optional[int] = None
+        try:
+            pay = await payment_dal.get_payment_by_provider_payment_id(
+                session,
+                provider="yookassa",
+                provider_payment_id=invoice_id,
+            )
+            if pay:
+                user_id = getattr(pay, "user_id", None)
+        except Exception:
+            log.exception("Cannot resolve user by provider_payment_id=%s", invoice_id)
+            return
+
+        if not user_id:
+            log.warning("No user_id for invoice_id=%s, skip notify", invoice_id)
+            return
+
+        text = "✅ Чек сформирован и зарегистрирован в ФНС."
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Открыть чек", url=ofd_url)]] if ofd_url else []
+        )
+        try:
+            await bot.send_message(user_id, text, reply_markup=kb, disable_web_page_preview=True)
+        except Exception as e:
+            log.warning("Failed to send receipt message to user %s: %s", user_id, e)
 
     async def ferma_callback(request: web.Request) -> web.Response:
-        if not _ip_allowed(request, cidrs):
-            return web.json_response({"ok": False, "error": "forbidden"}, status=403)
+        bot: Bot = request.app["bot"]
+        async_session_factory_local: sessionmaker = request.app["async_session_factory"]
+
         try:
-            payload = await request.json()
+            payload: Dict[str, Any] = await request.json()
         except Exception:
             return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
 
         data = payload.get("Data") or {}
-        status_code = data.get("StatusCode")
         invoice_id = data.get("InvoiceId")
         receipt_id = data.get("ReceiptId")
+        status_code = data.get("StatusCode")
         device = data.get("Device") or {}
         ofd_url = device.get("OfdReceiptUrl")
 
         if not invoice_id:
             return web.json_response({"ok": False, "error": "missing_invoice_id"}, status=400)
 
-        async with async_session_factory() as session:
+        async with async_session_factory_local() as session:
             repo = ReceiptsRepo(session)
             pr = await repo.get_by_invoice_id(invoice_id)
             if not pr:
-                # возможно, ретрай от Ferma по старому invoice_id — просто проигнорим
-                return web.json_response({"ok": True, "ignored": True, "reason": "unknown_invoice"})
+                log.warning("Unknown invoice_id in Ferma callback: %s", invoice_id)
+                return web.json_response({"ok": True, "ignored": True})
 
-            if status_code == 2:          # CONFIRMED
+            if status_code == 2:  # CONFIRMED
                 await repo.mark_confirmed(pr, ofd_url)
-                log.info("Ferma CONFIRMED: invoice_id=%s receipt_id=%s ofd=%s", invoice_id, receipt_id, ofd_url)
-            elif status_code == 1:        # PROCESSED
+                log.info("CONFIRMED invoice_id=%s receipt_id=%s", invoice_id, receipt_id)
+                await _notify_user(session, bot, invoice_id, ofd_url)
+            elif status_code == 1:  # PROCESSED
                 await repo.mark_processed(pr)
-                log.info("Ferma PROCESSED: invoice_id=%s receipt_id=%s", invoice_id, receipt_id)
-            elif status_code == 3:        # KKT_ERROR
+            elif status_code == 3:  # KKT_ERROR
                 await repo.mark_kkt_error(pr, error=str(payload))
-                log.warning("Ferma KKT_ERROR: invoice_id=%s receipt_id=%s payload=%s", invoice_id, receipt_id, payload)
-            else:                          # 0 NEW или иной
-                log.info("Ferma status=%s invoice_id=%s receipt_id=%s", status_code, invoice_id, receipt_id)
+            # 0/прочие — просто принимаем
 
         return web.json_response({"ok": True})
 
