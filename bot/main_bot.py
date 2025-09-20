@@ -56,6 +56,16 @@ async def on_startup_configured(dispatcher: Dispatcher):
 
     logging.info("STARTUP: on_startup_configured executing...")
 
+    # --- FERMA: гарантируем, что таблица чеков создана до начала работы вебхуков
+    try:
+        from db.database_setup import async_engine as _engine_for_schema
+        from db.models.receipts import Base as _ReceiptsBase
+        async with _engine_for_schema.begin() as conn:
+            await conn.run_sync(_ReceiptsBase.metadata.create_all)
+        logging.info("STARTUP: Receipts DB schema ensured (payment_receipts).")
+    except Exception as e:
+        logging.error("STARTUP: Failed to ensure receipts DB schema: %s", e, exc_info=True)
+        raise
 
     telegram_webhook_url_to_set = settings.WEBHOOK_BASE_URL
     if telegram_webhook_url_to_set:
@@ -258,7 +268,7 @@ async def run_bot(settings_param: Settings):
     for key, service in services.items():
         dp[key] = service
     dp["panel_service"] = services["panel_service"]
-    dp["async_session_factory"] = local_async_session_factory
+    dp["async_session_factory"] = local_async_session_factory  # нужно для фискализации/вебхуков Ferma
 
     # Wrap startup/shutdown handlers to satisfy aiogram event signature (no args passed)
     async def _on_startup_wrapper():

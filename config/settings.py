@@ -63,7 +63,6 @@ class Settings(BaseSettings):
     STARS_PRICE_6_MONTHS: Optional[int] = Field(default=None)
     STARS_PRICE_12_MONTHS: Optional[int] = Field(default=None)
 
-
     TRIBUTE_LINK_1_MONTH: Optional[str] = Field(default=None)
     TRIBUTE_LINK_3_MONTHS: Optional[str] = Field(default=None)
     TRIBUTE_LINK_6_MONTHS: Optional[str] = Field(default=None)
@@ -108,8 +107,7 @@ class Settings(BaseSettings):
     USER_TRAFFIC_STRATEGY: str = Field(default="NO_RESET")
     USER_SQUAD_UUIDS: Optional[str] = Field(
         default=None,
-        description=
-        "Comma-separated UUIDs of internal squads to assign to new panel users")
+        description="Comma-separated UUIDs of internal squads to assign to new panel users")
 
     TRIAL_ENABLED: bool = Field(default=True)
     TRIAL_DURATION_DAYS: int = Field(default=3)
@@ -129,6 +127,31 @@ class Settings(BaseSettings):
     INLINE_USER_STATS_THUMBNAIL_URL: str = Field(default="https://cdn-icons-png.flaticon.com/512/681/681494.png")
     INLINE_FINANCIAL_STATS_THUMBNAIL_URL: str = Field(default="https://cdn-icons-png.flaticon.com/512/2769/2769339.png")
     INLINE_SYSTEM_STATS_THUMBNAIL_URL: str = Field(default="https://cdn-icons-png.flaticon.com/512/2920/2920277.png")
+
+    # ----------------------------- FERMA (OFD) -----------------------------
+    FERMA_BASE_URL: str = Field(default="https://ferma.ofd.ru")
+    FERMA_LOGIN: Optional[str] = Field(default=None)
+    FERMA_PASSWORD: Optional[str] = Field(default=None)
+    FERMA_INN: Optional[str] = Field(default=None)
+
+    FERMA_TAXATION_SYSTEM: str = Field(default="SimpleIn")      # Common|SimpleIn|SimpleInOut|Unified|UnifiedAgricultural|Patent
+    FERMA_IS_INTERNET: bool = Field(default=True)
+    FERMA_BILL_ADDRESS: Optional[str] = Field(default=None)
+    FERMA_VAT: str = Field(default="VatNo")                     # Vat20|Vat10|Vat0|VatNo
+    FERMA_PAYMENT_TYPE: int = Field(default=4)                  # предмет расчёта: услуга
+    FERMA_PAYMENT_METHOD: int = Field(default=4)                # способ расчёта: полный расчёт
+    FERMA_MEASURE: str = Field(default="PIECE")                 # ФФД 1.2
+    FERMA_TIMEZONE: int = Field(default=0, description="1..11; 0 — не передавать Timezone")
+
+    FERMA_CALLBACK_PATH: str = Field(default="/webhook/ferma", description="HTTP path for Ferma callback POST")
+
+    # список доверенных подсетей (строкой), парсим ниже в вычисляемом свойстве
+    FERMA_TRUSTED_CIDRS: Optional[str] = Field(default=None, description="Comma-separated CIDRs (e.g. '94.143.160.0/24,94.143.161.0/24')")
+
+    FERMA_STATUS_FALLBACK_DELAY_SEC: int = Field(default=180)
+    FERMA_STATUS_FALLBACK_RETRIES: int = Field(default=5)
+    FERMA_STATUS_FALLBACK_INTERVAL_SEC: int = Field(default=180)
+    # ----------------------------------------------------------------------
 
     @computed_field
     @property
@@ -186,7 +209,6 @@ class Settings(BaseSettings):
     @computed_field
     @property
     def yookassa_webhook_path(self) -> str:
-
         return "/webhook/yookassa"
 
     @computed_field
@@ -319,7 +341,44 @@ class Settings(BaseSettings):
         if self.REFERRAL_BONUS_DAYS_REFEREE_12_MONTHS is not None:
             bonuses[12] = self.REFERRAL_BONUS_DAYS_REFEREE_12_MONTHS
         return bonuses
-    
+
+    # ----------------------------- FERMA computed -----------------------------
+    @computed_field
+    @property
+    def ferma_callback_path(self) -> str:
+        """
+        Санитизированный путь колбэка Ferma (гарантируем ведущий '/').
+        Используй это свойство при регистрации маршрута.
+        """
+        path = (self.FERMA_CALLBACK_PATH or "/webhook/ferma").strip()
+        if not path.startswith("/"):
+            path = "/" + path
+        return path
+
+    @computed_field
+    @property
+    def ferma_full_callback_url(self) -> Optional[str]:
+        """
+        Полный URL колбэка Ferma: WEBHOOK_BASE_URL + ferma_callback_path.
+        """
+        base = self.WEBHOOK_BASE_URL
+        if base:
+            return f"{base.rstrip('/')}{self.ferma_callback_path}"
+        return None
+
+    @computed_field
+    @property
+    def ferma_parsed_trusted_cidrs(self) -> List[str]:
+        """
+        Преобразует FERMA_TRUSTED_CIDRS в список строк без пробелов.
+        Пример: "94.143.160.0/24, 94.143.161.0/24" -> ["94.143.160.0/24","94.143.161.0/24"]
+        """
+        raw = (self.FERMA_TRUSTED_CIDRS or "").strip()
+        if not raw:
+            return []
+        return [x.strip() for x in raw.split(",") if x.strip()]
+    # -------------------------------------------------------------------------
+
     # Logging Configuration
     LOG_CHAT_ID: Optional[int] = Field(default=None, description="Telegram chat/group ID for sending notifications")
     LOG_THREAD_ID: Optional[int] = Field(default=None, description="Thread ID for supergroup messages (optional)")
@@ -331,6 +390,19 @@ class Settings(BaseSettings):
         if isinstance(v, str) and v.strip() == '':
             return None
         return v
+
+    @field_validator('FERMA_CALLBACK_PATH', mode='before')
+    @classmethod
+    def validate_ferma_callback_path(cls, v):
+        """
+        Нормализуем путь колбэка Ferma: если пусто — дефолт, без пробелов, с ведущим '/'.
+        """
+        if v is None:
+            return "/webhook/ferma"
+        s = str(v).strip()
+        if not s:
+            return "/webhook/ferma"
+        return s if s.startswith("/") else f"/{s}"
     
     # Notification types
     LOG_NEW_USERS: bool = Field(default=True, description="Send notifications for new user registrations")
@@ -339,10 +411,12 @@ class Settings(BaseSettings):
     LOG_TRIAL_ACTIVATIONS: bool = Field(default=True, description="Send notifications for trial activations")
     LOG_SUSPICIOUS_ACTIVITY: bool = Field(default=True, description="Send notifications for suspicious promo attempts")
 
-    model_config = SettingsConfigDict(env_file='.env',
-                                      env_file_encoding='utf-8',
-                                      extra='ignore',
-                                      populate_by_name=True)
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        env_file_encoding='utf-8',
+        extra='ignore',
+        populate_by_name=True
+    )
 
 
 _settings_instance: Optional[Settings] = None
@@ -366,6 +440,26 @@ def get_settings() -> Settings:
                 logging.warning(
                     "CRITICAL: YooKassa credentials (SHOP_ID or SECRET_KEY) are not set. Payments will not work."
                 )
+
+            # --- FERMA sanity checks ---
+            if any([
+                _settings_instance.FERMA_LOGIN,
+                _settings_instance.FERMA_PASSWORD,
+                _settings_instance.FERMA_INN
+            ]):
+                # если начали настраивать Ferma — проверим, что всё заполнено
+                missing = []
+                if not _settings_instance.FERMA_LOGIN:
+                    missing.append("FERMA_LOGIN")
+                if not _settings_instance.FERMA_PASSWORD:
+                    missing.append("FERMA_PASSWORD")
+                if not _settings_instance.FERMA_INN:
+                    missing.append("FERMA_INN")
+                if missing:
+                    logging.warning(
+                        "FERMA is partially configured; missing: %s. Fiscalization will fail until fixed.",
+                        ", ".join(missing)
+                    )
 
         except ValidationError as e:
             logging.critical(

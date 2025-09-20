@@ -23,6 +23,9 @@ from config.settings import Settings
 from bot.services.notification_service import NotificationService
 from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
 
+# --- NEW: фискализация Ferma
+from bot.services.fiscalization_service import fiscalize_on_yookassa_succeeded
+
 payment_processing_lock = asyncio.Lock()
 
 YOOKASSA_EVENT_PAYMENT_SUCCEEDED = 'payment.succeeded'
@@ -224,6 +227,7 @@ async def process_successful_payment(session: AsyncSession, bot: Bot,
         _ = lambda key, **kwargs: i18n.gettext(user_lang, key, **kwargs)
 
         # For auto-renew charges, avoid re-sending config link; send concise message
+        is_auto_renew = bool(auto_renew_subscription_id_str and not payment_db_id_str)
         if is_auto_renew and final_end_date_for_user:
             details_message = _(
                 "yookassa_auto_renewal",
@@ -470,6 +474,55 @@ async def yookassa_webhook_route(request: web.Request):
                                 i18n_instance, settings, panel_service,
                                 subscription_service, referral_service)
                             await session.commit()
+
+                            # ------------------------- FERMA FISCALIZATION -------------------------
+                            try:
+                                # Подготовим минимальный payload в формате YooKassa
+                                # Заполним email из настроек, если ничего другого нет
+                                metadata = payment_dict_for_processing.get("metadata", {}) or {}
+                                user_id_str = metadata.get("user_id")
+                                buyer_email = settings.YOOKASSA_DEFAULT_RECEIPT_EMAIL
+                                buyer_phone = None
+
+                                # Если хочешь тянуть телефон/email из своей БД — можно:
+                                # if user_id_str and str(user_id_str).isdigit():
+                                #     db_user = await user_dal.get_user_by_id(session, int(user_id_str))
+                                #     if db_user and getattr(db_user, "email", None):
+                                #         buyer_email = db_user.email
+                                #     if db_user and getattr(db_user, "phone", None):
+                                #         buyer_phone = db_user.phone
+
+                                fiscal_payload = {
+                                    "event": "payment.succeeded",
+                                    "object": {
+                                        "id": payment_dict_for_processing.get("id"),
+                                        "status": payment_dict_for_processing.get("status"),
+                                        "amount": {
+                                            "value": payment_dict_for_processing.get("amount", {}).get("value", "0.0")
+                                        },
+                                        "description": payment_dict_for_processing.get("description"),
+                                        "receipt": {
+                                            "customer": {
+                                                # Ferma примет отсутствие этих полей; если есть — передадим
+                                                **({"email": buyer_email} if buyer_email else {}),
+                                                **({"phone": buyer_phone} if buyer_phone else {}),
+                                            }
+                                        }
+                                    }
+                                }
+                                fiscal_result = await fiscalize_on_yookassa_succeeded(async_session_factory, fiscal_payload)
+                                if not fiscal_result.get("ok"):
+                                    logging.error("Fiscalization failed for payment %s: %s",
+                                                  payment_dict_for_processing.get("id"), fiscal_result)
+                                else:
+                                    logging.info("Fiscalization queued/sent for payment %s: %s",
+                                                 payment_dict_for_processing.get("id"), fiscal_result)
+                            except Exception:
+                                # Не валим вебхук YooKassa — просто логируем
+                                logging.exception("Exception while starting fiscalization for YK payment %s",
+                                                  payment_dict_for_processing.get("id"))
+                            # ----------------------------------------------------------------------
+
                         else:
                             logging.warning(
                                 f"Payment Succeeded event for {payment_dict_for_processing.get('id')} "

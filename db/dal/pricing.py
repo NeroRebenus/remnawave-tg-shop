@@ -1,6 +1,7 @@
 from typing import Literal, TypedDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import update
 
 from config.settings import Settings
 from db.models import UserPricePlan
@@ -91,3 +92,22 @@ async def get_effective_prices(session: AsyncSession, user_id: int) -> Effective
         stars_6m=pick(plan.stars_6m,  "stars_6m"),
         stars_12m=pick(plan.stars_12m, "stars_12m"),
     )
+
+async def update_prices_for_all_users(
+    session: AsyncSession,
+    *,
+    rub_1m: int | None = None, rub_3m: int | None = None, rub_6m: int | None = None, rub_12m: int | None = None,
+    stars_1m: int | None = None, stars_3m: int | None = None, stars_6m: int | None = None, stars_12m: int | None = None,
+) -> int:
+    """Обновляет указанные поля у ВСЕХ записей UserPricePlan. Возвращает количество обновлённых строк."""
+    fields = {k: v for k, v in {
+        "rub_1m": rub_1m, "rub_3m": rub_3m, "rub_6m": rub_6m, "rub_12m": rub_12m,
+        "stars_1m": stars_1m, "stars_3m": stars_3m, "stars_6m": stars_6m, "stars_12m": stars_12m,
+    }.items() if v is not None}
+
+    if not fields:
+        return 0
+
+    result = await session.execute(update(UserPricePlan).values(**fields))
+    # result.rowcount может быть None у некоторых dialect’ов; тогда после commit можно посчитать через select, но чаще ок.
+    return result.rowcount or 0

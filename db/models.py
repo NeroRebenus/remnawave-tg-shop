@@ -1,9 +1,11 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger
-from sqlalchemy.orm import relationship, DeclarativeBase
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Float, ForeignKey, UniqueConstraint, Text, BigInteger, Enum
+from sqlalchemy.orm import relationship, DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.sql import func
 from datetime import datetime
-
+from __future__ import annotations
+from typing import Optional
+import enum
 
 class Base(AsyncAttrs, DeclarativeBase):
     pass
@@ -301,3 +303,42 @@ class UserPricePlan(Base):
             f"stars=[{self.stars_1m},{self.stars_3m},{self.stars_6m},{self.stars_12m}]"
             f")>"
         )
+
+
+# app/models/receipts.py
+
+class Base(DeclarativeBase):
+    pass
+
+class ReceiptStatus(enum.Enum):
+    NEW = "NEW"               # создали запись у себя (ещё не отправляли в Ferma)
+    SENT = "SENT"             # отправили в Ferma, получили ReceiptId
+    PROCESSED = "PROCESSED"   # статус Ferma: PROCESSED (1)
+    CONFIRMED = "CONFIRMED"   # статус Ferma: CONFIRMED (2) — чек в ОФД, успех
+    KKT_ERROR = "KKT_ERROR"   # статус Ferma: KKT_ERROR (3)
+    FAILED = "FAILED"         # локальная ошибка при общении с Ferma
+    DUPLICATE = "DUPLICATE"   # платеж уже фискализирован ранее
+
+class PaymentReceipt(Base):
+    __tablename__ = "payment_receipts"
+    __table_args__ = (
+        UniqueConstraint("payment_id", name="uq_payment_receipts_payment_id"),
+        UniqueConstraint("invoice_id", name="uq_payment_receipts_invoice_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    payment_id: Mapped[str] = mapped_column(String(128), nullable=False)   # YooKassa payment.id
+    invoice_id: Mapped[str] = mapped_column(String(160), nullable=False)   # отправляем в Ferma; меняется при ретраях
+    receipt_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)  # Ferma ReceiptId (UUID)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    description: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    customer_email: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    status: Mapped[ReceiptStatus] = mapped_column(Enum(ReceiptStatus), nullable=False, default=ReceiptStatus.NEW)
+    ofd_receipt_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=datetime.utcnow, onupdate=datetime.utcnow)
