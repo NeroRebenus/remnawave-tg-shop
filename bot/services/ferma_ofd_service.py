@@ -199,19 +199,21 @@ class FermaClient:
                 **({"Email": buyer_email} if buyer_email else {}),
                 **({"Phone": buyer_phone} if buyer_phone else {}),
             },
-            # Можно класть произвольный идентификатор платежа для удобной сверки
             **({"PaymentIdentifiers": [payment_identifiers]} if payment_identifiers else {}),
         }
-        resp = await self._post_json("/api/v1/receipt/income", json=payload)
+
+        # ВАЖНО: _post_json не принимает keyword 'json' — передаем payload позиционно
+        resp = await self._post_json("/api/v1/receipt/income", payload)
 
         data = (resp or {}).get("Data") or resp or {}
         receipt_id = data.get("ReceiptId")
-        ferma_invoice_id = data.get("InvoiceId")  # может совпадать с тем, что передали, а может быть новым
+        ferma_invoice_id = data.get("InvoiceId")
 
         if not receipt_id:
             raise FermaError(f"Invalid response from Ferma: {resp}")
 
         return {"receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
+
 
 
     async def check_status(
