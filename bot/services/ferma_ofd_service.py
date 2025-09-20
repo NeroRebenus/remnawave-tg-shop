@@ -195,8 +195,21 @@ class FermaClient:
 
         # --- строгая подготовка INN ---
         inn = str(getattr(s, "FERMA_INN", "")).strip()
+
         if not inn.isdigit() or len(inn) not in (10, 12):
-            raise FermaError(f"ENV FERMA_INN is invalid: {inn!r}")
+            # Лог + корректное формирование FermaError (status, payload)
+            log.error("FERMA_INN invalid or not set. Got: %r", inn)
+            raise FermaError(
+                400,
+                {
+                    "Status": "Failed",
+                    "Error": {
+                        "Code": 1007,
+                        "Message": f"ENV FERMA_INN is invalid: {inn!r}",
+                    },
+                },
+            )
+
 
         # --- опциональная группа касс (на тесте часто нужна 555) ---
         group_code = getattr(s, "FERMA_GROUP_CODE", None)
@@ -256,6 +269,7 @@ class FermaClient:
                     _json.dumps(payload, ensure_ascii=False)[:1200])
         except Exception:
             pass
+        log.info("Ferma SEND: Inn=%s, InvoiceId=%s, Amount=%.2f", inn, invoice_id, float(amount))
 
         # --- вызов Ferma ---
         resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
