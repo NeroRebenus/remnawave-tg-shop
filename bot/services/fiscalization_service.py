@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy.orm import sessionmaker
 
 from db.repositories.receipts_repo import ReceiptsRepo
-from db.models.receipts import ReceiptStatus  # убедись, что путь верный
+from db.models import ReceiptStatus
 from bot.services.ferma_ofd_service import FermaClient, FermaError
 from config.settings import get_settings
 
