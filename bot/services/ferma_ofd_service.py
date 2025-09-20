@@ -176,7 +176,6 @@ class FermaClient:
 
     # --------------------- public API ---------------------
 
-    # Внутри класса FermaClient
     async def send_income_receipt(
         self,
         invoice_id: str,
@@ -202,8 +201,8 @@ class FermaClient:
             **({"PaymentIdentifiers": [payment_identifiers]} if payment_identifiers else {}),
         }
 
-        # ВАЖНО: _post_json не принимает keyword 'json' — передаем payload позиционно
-        resp = await self._post_json("/api/v1/receipt/income", payload)
+        # _post_json требует use_token
+        resp = await self._post_json("/api/v1/receipt/income", payload, use_token=True)
 
         data = (resp or {}).get("Data") or resp or {}
         receipt_id = data.get("ReceiptId")
@@ -213,6 +212,7 @@ class FermaClient:
             raise FermaError(f"Invalid response from Ferma: {resp}")
 
         return {"receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
+
 
 
 
