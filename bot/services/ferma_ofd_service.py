@@ -342,7 +342,6 @@ class FermaClient:
         customer_name: Optional[str],
     ) -> Dict[str, Any]:
         cr: Dict[str, Any] = {
-            "TaxationSystem": self.cfg.taxation_system,
             "CashlessPayments": [{
                 "PaymentSum": round(float(amount), 2),
                 "PaymentMethodFlag": "1",
