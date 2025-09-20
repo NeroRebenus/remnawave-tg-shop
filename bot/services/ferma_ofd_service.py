@@ -203,6 +203,10 @@ class FermaClient:
                     inn, getattr(s, "FERMA_INN", None), os.getenv("FERMA_INN"))
             raise FermaError(400, {"Status":"Failed","Error":{"Code":1007,"Message":f"ENV FERMA_INN is invalid: {inn!r}"}})
 
+        log.info(
+            "Ferma SEND: Inn=%r, Tax=%r, Base=%r",
+            inn, getattr(s, "FERMA_TAXATION_SYSTEM", None), getattr(s, "FERMA_BASE_URL", None)
+        )
 
         if not inn.isdigit() or len(inn) not in (10, 12):
             # Лог + корректное формирование FermaError (status, payload)
