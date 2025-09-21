@@ -96,6 +96,45 @@ def _short(s: Any, limit: int = 600) -> str:
 def make_ferma_callback_handler(async_session_factory: sessionmaker):
     cidrs = _trusted_cidrs()
 
+    async def _notify_user_with_receipt(session, bot, pr, ofd_url) -> bool:
+        """
+        pr.payment_id — это наш «связующий» идентификатор (обычно YooKassa payment_id).
+        Поищем пользователя по двум полям: yookassa_payment_id ИЛИ provider_payment_id='yookassa'.
+        """
+        from sqlalchemy import select, or_, and_
+        from db.models import Payment
+
+        # 1) по yookassa_payment_id
+        q1 = select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
+        res = (await session.execute(q1)).scalars().first()
+        if not res:
+            # 2) fallback: по паре (provider='yookassa', provider_payment_id=...)
+            try:
+                q2 = select(Payment).where(
+                    and_(
+                        getattr(Payment, "provider", None) == "yookassa",
+                        getattr(Payment, "provider_payment_id", None) == pr.payment_id
+                    )
+                )
+                res = (await session.execute(q2)).scalars().first()
+            except Exception:
+                res = None
+
+        if not res or not getattr(res, "user_id", None):
+            logging.warning("Ferma webhook: cannot map receipt to user (payment_id=%s)", pr.payment_id)
+            return False
+
+        try:
+            await bot.send_message(
+                chat_id=res.user_id,
+                text=f"🧾 Ваш чек сформирован: {ofd_url}",
+                disable_web_page_preview=True,
+            )
+            return True
+        except Exception:
+            logging.exception("Failed to send receipt message to user_id=%s", res.user_id)
+            return False
+
     async def ferma_callback(request: web.Request) -> web.Response:
         if not _ip_allowed(request, cidrs):
             return web.json_response({"ok": False, "error": "forbidden"}, status=403)
@@ -111,17 +150,19 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
         device = data.get("Device") or {}
         ofd_url = device.get("OfdReceiptUrl")
 
-        from sqlalchemy import select
-        from db.models import Payment  # для поиска user_id по yookassa_payment_id
+        logging.info("Ferma webhook IN: status=%r invoice=%r receipt=%r ofd=%r", status_code, invoice_id, receipt_id, ofd_url)
 
         async with async_session_factory() as session:
             repo = ReceiptsRepo(session)
 
+            # 1) Сначала ищем по ReceiptId — самый надёжный ключ
             pr = None
-            # 1) Пытаемся найти по ReceiptId (надежнее всего)
             if receipt_id:
-                pr = await repo.get_by_receipt_id(receipt_id)
-            # 2) Если не нашли — пробуем по InvoiceId
+                try:
+                    pr = await repo.get_by_receipt_id(receipt_id)
+                except Exception:
+                    pr = None
+            # 2) Если не нашли — ищем по InvoiceId
             if not pr and invoice_id:
                 pr = await repo.get_by_invoice_id(invoice_id)
 
@@ -129,41 +170,55 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
                 logging.info("Ferma webhook: unknown invoice/receipt (ignored). invoice=%s receipt=%s", invoice_id, receipt_id)
                 return web.json_response({"ok": True, "ignored": True, "reason": "unknown_invoice"})
 
-            code = int(status_code) if isinstance(status_code, (int, float, str)) and str(status_code).isdigit() else None
+            # Нормализуем код статуса
+            code = None
+            try:
+                code = int(status_code)
+            except Exception:
+                s = str(status_code).strip().upper()
+                m = {"NEW": 0, "PROCESSED": 1, "CONFIRMED": 2, "KKT_ERROR": 3}
+                code = m.get(s)
+
+            branch = "unknown"
+            user_notified = False
+            repo_action = None
 
             if code == 2:  # CONFIRMED
-                already_had_url = bool(pr.ofd_receipt_url)
                 await repo.mark_confirmed(pr, ofd_url)
+                repo_action = "mark_confirmed"
+                branch = "confirmed"
 
-                # отправим ссылку пользователю, если появилась впервые
-                try:
-                    if ofd_url and not already_had_url:
-                        bot = request.app.get("bot")
-                        if bot:
-                            q = await session.execute(
-                                select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
-                            )
-                            payment_row = q.scalars().first()
-                            if payment_row and payment_row.user_id:
-                                await bot.send_message(
-                                    payment_row.user_id,
-                                    f"🧾 Ваш чек сформирован: {ofd_url}",
-                                    disable_web_page_preview=True,
-                                )
-                except Exception:
-                    logging.exception("Failed to notify user about receipt")
+                bot = request.app.get("bot")
+                if not bot:
+                    logging.warning("Ferma webhook: app['bot'] is missing; cannot notify user")
+                elif ofd_url:
+                    user_notified = await _notify_user_with_receipt(session, bot, pr, ofd_url)
 
             elif code == 1:  # PROCESSED
                 await repo.mark_processed(pr)
+                repo_action = "mark_processed"
+                branch = "processed"
+
             elif code == 3:  # KKT_ERROR
                 await repo.mark_kkt_error(pr, error=str(payload))
+                repo_action = "mark_kkt_error"
+                branch = "kkt_error"
             else:
-                # NEW/unknown — просто залогируем
-                logging.info("Ferma webhook: status=%s invoice=%s receipt=%s", status_code, invoice_id, receipt_id)
+                branch = f"status_{status_code}"
+                logging.info("Ferma webhook: unhandled status=%r for invoice=%s", status_code, invoice_id)
 
-        return web.json_response({"ok": True})
+        return web.json_response({
+            "ok": True,
+            "branch": branch,
+            "invoice_id": invoice_id,
+            "receipt_id": receipt_id,
+            "has_ofd_url": bool(ofd_url),
+            "user_notified": bool(user_notified),
+            "repo_action": repo_action,
+        })
 
     return ferma_callback
+
 
 
 

@@ -177,34 +177,32 @@ async def _fallback_poll_status(
                     return
 
                 if status_code == 2:  # CONFIRMED
-                    # чтобы не слать дубль, проверим, была ли ссылка
                     had_url_before = bool(pr.ofd_receipt_url)
                     await repo.mark_confirmed(pr, ofd_url)
                     log.info("Fallback confirmed: invoice_id=%s ofd=%s", invoice_id, ofd_url)
 
-                    # 🧾 Попробуем уведомить пользователя, если ссылка появилась впервые
+                    # попытаемся уведомить юзера
                     try:
-                        if ofd_url and not had_url_before:
-                            # Найдём платеж и пользователя по YK payment.id == PaymentReceipt.payment_id
-                            q = await session.execute(
-                                select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
-                            )
+                        from sqlalchemy import select, and_
+                        from db.models import Payment
+                        s = get_settings()
+                        bot = Bot(token=s.BOT_TOKEN)
+                        try:
+                            q = await session.execute(select(Payment).where(Payment.yookassa_payment_id == pr.payment_id))
                             payment_row = q.scalars().first()
-                            if payment_row and payment_row.user_id:
-                                s = get_settings()
-                                bot = Bot(token=s.BOT_TOKEN)
-                                try:
-                                    await bot.send_message(
-                                        chat_id=payment_row.user_id,
-                                        text=f"🧾 Ваш чек сформирован: {ofd_url}",
-                                        disable_web_page_preview=True,
-                                    )
-                                finally:
-                                    await bot.session.close()
+                            if not payment_row and hasattr(Payment, "provider") and hasattr(Payment, "provider_payment_id"):
+                                q2 = await session.execute(
+                                    select(Payment).where(and_(Payment.provider == "yookassa", Payment.provider_payment_id == pr.payment_id))
+                                )
+                                payment_row = q2.scalars().first()
+                            if payment_row and payment_row.user_id and ofd_url:
+                                await bot.send_message(payment_row.user_id, f"🧾 Ваш чек сформирован: {ofd_url}", disable_web_page_preview=True)
+                        finally:
+                            await bot.session.close()
                     except Exception:
                         log.exception("Fallback: failed to notify user about receipt")
-
                     return
+
 
                 elif status_code == 1:  # PROCESSED (в обработке)
                     await repo.mark_processed(pr)
