@@ -35,7 +35,19 @@ class SubscriptionService:
             if user_record and user_record.language_code
             else self.settings.DEFAULT_LANGUAGE
         )
-
+    
+    async def _list_panel_users_by_tg_id(self, telegram_id: int) -> list[dict]:
+        """
+        Возвращает СПИСОК пользователей панели по telegramId.
+        Никогда не падает на 'больше 1', просто отдаёт весь список.
+        """
+        try:
+            users = await self.panel_service.get_users_by_filter(telegram_id=telegram_id)
+            return users or []
+        except Exception as e:
+            logging.error("Panel get_users_by_filter failed for tg=%s: %s", telegram_id, e, exc_info=True)
+            return []
+        
     async def has_had_any_subscription(self, session: AsyncSession, user_id: int) -> bool:
         return await subscription_dal.has_any_subscription_for_user(session, user_id)
 
@@ -427,52 +439,44 @@ class SubscriptionService:
         promo_code_id_from_payment: Optional[int] = None,
         provider: str = "yookassa",
     ) -> Optional[Dict[str, Any]]:
-
+        """
+        Теперь обновляет ВСЕХ panel-пользователей, связанных с данным TG user_id.
+        Для каждого panel_user:
+        - вычисляет свою дату старта/окончания,
+        - деактивирует другие активные локальные подписки на ЭТОГО panel_user,
+        - апсёртит локальную подписку,
+        - обновляет срок/статус на панели.
+        Возвращает агрегированный результат.
+        """
         db_user = await user_dal.get_user_by_id(session, user_id)
         if not db_user:
-            logging.error(
-                f"User {user_id} not found in DB for paid subscription activation."
-            )
+            logging.error("User %s not found in DB for paid subscription activation.", user_id)
             return None
 
-        panel_user_uuid, panel_sub_link_id, panel_short_uuid, panel_user_created_now = (
-            await self._get_or_create_panel_user_link_details(session, user_id, db_user)
-        )
+        # 1) Получаем всех panel-пользователей по telegramId
+        panel_users = await self._list_panel_users_by_tg_id(user_id)
 
-        if not panel_user_uuid or not panel_sub_link_id:
-            logging.error(
-                f"Failed to ensure panel user for TG {user_id} during paid subscription."
+        # Если на панели никого нет — создаём ОДНОГО, как раньше
+        if not panel_users:
+            panel_uuid, panel_sub_link_id, panel_short_uuid, created_now = (
+                await self._get_or_create_panel_user_link_details(session, user_id, db_user)
             )
-            return None
+            if not panel_uuid or not panel_sub_link_id:
+                logging.error("Failed to ensure panel user for TG %s during paid subscription.", user_id)
+                return None
+            panel_users = [{
+                "uuid": panel_uuid,
+                "subscriptionUuid": panel_sub_link_id,
+                "shortUuid": panel_short_uuid
+            }]
 
-        current_active_sub = await subscription_dal.get_active_subscription_by_user_id(
-            session, user_id, panel_user_uuid
-        )
-        start_date = datetime.now(timezone.utc)
-        if (
-            current_active_sub
-            and current_active_sub.end_date
-            and current_active_sub.end_date > start_date
-        ):
-            start_date = current_active_sub.end_date
-
-        # base duration by months
-        end_after_months = add_months(start_date, months)
-        duration_days_total = (end_after_months - start_date).days
+        # 2) Применяем промокод (один раз на оплату) — бонусные дни одинаковые для всех panel_user
         applied_promo_bonus_days = 0
-
         if promo_code_id_from_payment:
-            promo_model = await promo_code_dal.get_promo_code_by_id(
-                session, promo_code_id_from_payment
-            )
-            if (
-                promo_model
-                and promo_model.is_active
-                and promo_model.current_activations < promo_model.max_activations
-            ):
+            promo_model = await promo_code_dal.get_promo_code_by_id(session, promo_code_id_from_payment)
+            if promo_model and promo_model.is_active and promo_model.current_activations < promo_model.max_activations:
                 applied_promo_bonus_days = promo_model.bonus_days
-                duration_days_total += applied_promo_bonus_days
-
+                # запишем активацию один раз (к текущему платежу)
                 activation = await promo_code_dal.record_promo_activation(
                     session,
                     promo_code_id_from_payment,
@@ -480,86 +484,124 @@ class SubscriptionService:
                     payment_id=payment_db_id,
                 )
                 if activation:
-                    await promo_code_dal.increment_promo_code_usage(
-                        session, promo_code_id_from_payment
-                    )
+                    await promo_code_dal.increment_promo_code_usage(session, promo_code_id_from_payment)
                 else:
                     logging.warning(
-                        f"Promo code {promo_code_id_from_payment} was already activated by user {user_id}, but bonus applied via payment {payment_db_id}."
+                        "Promo code %s already activated by user %s (payment %s).",
+                        promo_code_id_from_payment, user_id, payment_db_id
                     )
             else:
-                logging.warning(
-                    f"Promo code ID {promo_code_id_from_payment} (from payment) not found or invalid."
-                )
+                logging.warning("Promo code ID %s from payment not found/invalid.", promo_code_id_from_payment)
                 promo_code_id_from_payment = None
 
-        final_end_date = start_date + timedelta(days=duration_days_total)
-        await subscription_dal.deactivate_other_active_subscriptions(
-            session, panel_user_uuid, panel_sub_link_id
-        )
+        aggregated: list[dict] = []
+        overall_latest_end: Optional[datetime] = None
 
-        sub_payload = {
-            "user_id": user_id,
-            "panel_user_uuid": panel_user_uuid,
-            "panel_subscription_uuid": panel_sub_link_id,
-            "start_date": start_date,
-            "end_date": final_end_date,
-            "duration_months": months,
-            "is_active": True,
-            "status_from_panel": "ACTIVE",
-            "traffic_limit_bytes": self.settings.user_traffic_limit_bytes,
-            "provider": provider,
-            "skip_notifications": provider == "tribute" and self.settings.TRIBUTE_SKIP_NOTIFICATIONS,
-            "auto_renew_enabled": True,
-        }
-        try:
-            new_or_updated_sub = await subscription_dal.upsert_subscription(
-                session, sub_payload
+        # 3) Обновляем КАЖДОГО panel-пользователя
+        for pu in panel_users:
+            panel_user_uuid = pu.get("uuid")
+            panel_sub_link_id = pu.get("subscriptionUuid") or pu.get("shortUuid")
+            panel_short_uuid = pu.get("shortUuid")
+
+            if not panel_user_uuid or not panel_sub_link_id:
+                logging.warning("Skip panel user without subscription link: %s", pu)
+                continue
+
+            # Точка старта: если у этого panel_user есть активная подписка — с её конца
+            now_utc = datetime.now(timezone.utc)
+            current_active_sub = await subscription_dal.get_active_subscription_by_user_id(
+                session, user_id, panel_user_uuid
             )
-        except Exception as e_upsert_sub:
-            logging.error(
-                f"Failed to upsert paid subscription for user {user_id}: {e_upsert_sub}",
-                exc_info=True,
+            start_date = now_utc
+            if current_active_sub and current_active_sub.end_date and current_active_sub.end_date > now_utc:
+                start_date = current_active_sub.end_date
+
+            # Подсчёт финальной даты
+            from bot.utils.date_utils import add_months
+            end_after_months = add_months(start_date, months)
+            duration_days_total = (end_after_months - start_date).days + applied_promo_bonus_days
+            final_end_date = start_date + timedelta(days=duration_days_total)
+
+            # Деактивируем другие активные локальные для ЭТОГО panel_user
+            await subscription_dal.deactivate_other_active_subscriptions(
+                session, panel_user_uuid, panel_sub_link_id
             )
+
+            sub_payload = {
+                "user_id": user_id,
+                "panel_user_uuid": panel_user_uuid,
+                "panel_subscription_uuid": panel_sub_link_id,
+                "start_date": start_date,
+                "end_date": final_end_date,
+                "duration_months": months,
+                "is_active": True,
+                "status_from_panel": "ACTIVE",
+                "traffic_limit_bytes": self.settings.user_traffic_limit_bytes,
+                "provider": provider,
+                "skip_notifications": provider == "tribute" and self.settings.TRIBUTE_SKIP_NOTIFICATIONS,
+                "auto_renew_enabled": True,
+            }
+            try:
+                new_or_updated_sub = await subscription_dal.upsert_subscription(session, sub_payload)
+            except Exception as e_upsert_sub:
+                logging.error("Failed to upsert paid subscription for user %s (panel %s): %s",
+                            user_id, panel_user_uuid, e_upsert_sub, exc_info=True)
+                continue
+
+            # Обновляем пользователя на панели
+            panel_update_payload = self._build_panel_update_payload(
+                panel_user_uuid=panel_user_uuid,
+                expire_at=final_end_date,
+                status="ACTIVE",
+                traffic_limit_bytes=self.settings.user_traffic_limit_bytes,
+            )
+            panel_update_payload["description"] = "\n".join(
+                [
+                    (db_user.username or "") if db_user else "",
+                    (db_user.first_name or "") if db_user else "",
+                    (db_user.last_name or "") if db_user else "",
+                ]
+            )
+
+            updated_panel_user = await self.panel_service.update_user_details_on_panel(
+                panel_user_uuid, panel_update_payload
+            )
+            if not updated_panel_user or updated_panel_user.get("error"):
+                logging.warning("Panel details update FAILED for panel user %s. Response: %s",
+                                panel_user_uuid, updated_panel_user)
+                # продолжаем остальные
+
+            final_subscription_url = (updated_panel_user or {}).get("subscriptionUrl")
+            final_panel_short_uuid = (updated_panel_user or {}).get("shortUuid", panel_short_uuid)
+
+            aggregated.append({
+                "subscription_id": new_or_updated_sub.subscription_id,
+                "panel_user_uuid": panel_user_uuid,
+                "panel_short_uuid": final_panel_short_uuid,
+                "subscription_url": final_subscription_url,
+                "end_date": final_end_date,
+            })
+
+            if overall_latest_end is None or final_end_date > overall_latest_end:
+                overall_latest_end = final_end_date
+
+        if not aggregated:
+            # Ничего не смогли обновить
             return None
 
-        panel_update_payload = self._build_panel_update_payload(
-            panel_user_uuid=panel_user_uuid,
-            expire_at=final_end_date,
-            status="ACTIVE",
-            traffic_limit_bytes=self.settings.user_traffic_limit_bytes,
-        )
-
-        # Add user description based on Telegram profile
-        panel_update_payload["description"] = "\n".join(
-            [
-                (db_user.username or "") if db_user else "",
-                (db_user.first_name or "") if db_user else "",
-                (db_user.last_name or "") if db_user else "",
-            ]
-        )
-
-        updated_panel_user = await self.panel_service.update_user_details_on_panel(
-            panel_user_uuid, panel_update_payload
-        )
-        if not updated_panel_user or updated_panel_user.get("error"):
-            logging.warning(
-                f"Panel user details update FAILED for paid sub user {panel_user_uuid}. Response: {updated_panel_user}"
-            )
-            return None
-
-        final_subscription_url = updated_panel_user.get("subscriptionUrl")
-        final_panel_short_uuid = updated_panel_user.get("shortUuid", panel_short_uuid)
-
+        # Возвращаем агрегированный ответ (для обратной совместимости кладём ключи как раньше и дополнительные)
         return {
-            "subscription_id": new_or_updated_sub.subscription_id,
-            "end_date": final_end_date,
+            "updated_count": len(aggregated),
+            "entries": aggregated,
+            "end_date": overall_latest_end,
             "is_active": True,
-            "panel_user_uuid": panel_user_uuid,
-            "panel_short_uuid": final_panel_short_uuid,
-            "subscription_url": final_subscription_url,
+            # совместимость с прежними потребителями:
+            "panel_user_uuid": aggregated[0]["panel_user_uuid"],
+            "panel_short_uuid": aggregated[0]["panel_short_uuid"],
+            "subscription_url": aggregated[0]["subscription_url"],
             "applied_promo_bonus_days": applied_promo_bonus_days,
         }
+
 
     async def extend_active_subscription_days(
         self,
@@ -568,94 +610,86 @@ class SubscriptionService:
         bonus_days: int,
         reason: str = "bonus",
     ) -> Optional[datetime]:
-        user = await user_dal.get_user_by_id(session, user_id)
-        if not user:
-            logging.warning(
-                f"Cannot extend subscription for user {user_id}: user not found."
-            )
+        """
+        Расширяет подписку СРАЗУ для всех panel-пользователей, связанных с TG user_id.
+        Возвращает максимальную из новых дат окончания (для удобства).
+        """
+        db_user = await user_dal.get_user_by_id(session, user_id)
+        if not db_user:
+            logging.warning("Cannot extend subscription for user %s: user not found.", user_id)
             return None
 
-        panel_uuid, panel_sub_uuid, _, _ = await self._get_or_create_panel_user_link_details(
-            session, user_id, user
-        )
-        if not panel_uuid or not panel_sub_uuid:
-            logging.error(
-                f"Failed to ensure panel user for subscription extension of user {user_id}."
-            )
-            return None
+        panel_users = await self._list_panel_users_by_tg_id(user_id)
 
-        active_sub = await subscription_dal.get_active_subscription_by_user_id(
-            session, user_id, panel_uuid
-        )
-        if not active_sub or not active_sub.end_date:
-            logging.info(
-                f"No active subscription found for user {user_id}. Creating new one for {bonus_days} days."
+        # Если нет ни одного panel-user — создаём одного (как раньше)
+        if not panel_users:
+            panel_uuid, panel_sub_uuid, _, _ = await self._get_or_create_panel_user_link_details(session, user_id, db_user)
+            if not panel_uuid or not panel_sub_uuid:
+                logging.error("Failed to ensure panel user for subscription extension of user %s.", user_id)
+                return None
+            panel_users = [{"uuid": panel_uuid, "subscriptionUuid": panel_sub_uuid, "shortUuid": None}]
+
+        overall_latest_end: Optional[datetime] = None
+        # Выбор лимита трафика под причину
+        is_promo = "promo code" in (reason or "").lower()
+        traffic_limit = self.settings.user_traffic_limit_bytes if is_promo else self.settings.trial_traffic_limit_bytes
+
+        for pu in panel_users:
+            panel_uuid = pu.get("uuid")
+            panel_sub_uuid = pu.get("subscriptionUuid") or pu.get("shortUuid")
+            if not panel_uuid or not panel_sub_uuid:
+                logging.warning("Skip panel user without subscription link: %s", pu)
+                continue
+
+            active_sub = await subscription_dal.get_active_subscription_by_user_id(
+                session, user_id, panel_uuid
             )
-            start_date = datetime.now(timezone.utc)
-            new_end_date_obj = start_date + timedelta(days=bonus_days)
-            
-            # For promo code activations, use the configured user traffic limit
-            traffic_limit = self.settings.user_traffic_limit_bytes if "promo code" in reason.lower() else self.settings.trial_traffic_limit_bytes
-            
-            bonus_sub_payload = {
-                "user_id": user_id,
-                "panel_user_uuid": panel_uuid,
-                "panel_subscription_uuid": panel_sub_uuid,
-                "start_date": start_date,
-                "end_date": new_end_date_obj,
-                "duration_months": 0,
-                "is_active": True,
-                "status_from_panel": "ACTIVE_BONUS",
-                "traffic_limit_bytes": traffic_limit,
-            }
-            await subscription_dal.deactivate_other_active_subscriptions(
-                session, panel_uuid, panel_sub_uuid
-            )
-            updated_sub_model = await subscription_dal.upsert_subscription(
-                session, bonus_sub_payload
-            )
-        else:
-            current_end_date = active_sub.end_date
+
             now_utc = datetime.now(timezone.utc)
-            start_point_for_bonus = (
-                current_end_date if current_end_date > now_utc else now_utc
-            )
-            new_end_date_obj = start_point_for_bonus + timedelta(days=bonus_days)
+            if not active_sub or not active_sub.end_date:
+                # создаём новую «бонусную»
+                start_date = now_utc
+                new_end = start_date + timedelta(days=bonus_days)
 
-            updated_sub_model = await subscription_dal.update_subscription_end_date(
-                session, active_sub.subscription_id, new_end_date_obj
-            )
-
-        if updated_sub_model:
-            # Prepare panel update payload
-            panel_update_payload = self._build_panel_update_payload(
-                expire_at=new_end_date_obj,
-                traffic_limit_bytes=(
-                    self.settings.user_traffic_limit_bytes if "promo code" in reason.lower() else None
-                ),
-                include_uuid=False,
-            )
-            
-            panel_update_success = (
-                await self.panel_service.update_user_details_on_panel(
-                    panel_uuid,
-                    panel_update_payload,
-                )
-            )
-            if not panel_update_success:
-                logging.warning(
-                    f"Panel expiry update failed for {panel_uuid} after {reason} bonus. Local DB was updated to {new_end_date_obj}."
+                await subscription_dal.deactivate_other_active_subscriptions(session, panel_uuid, panel_sub_uuid)
+                bonus_sub_payload = {
+                    "user_id": user_id,
+                    "panel_user_uuid": panel_uuid,
+                    "panel_subscription_uuid": panel_sub_uuid,
+                    "start_date": start_date,
+                    "end_date": new_end,
+                    "duration_months": 0,
+                    "is_active": True,
+                    "status_from_panel": "ACTIVE_BONUS",
+                    "traffic_limit_bytes": traffic_limit,
+                }
+                updated_sub_model = await subscription_dal.upsert_subscription(session, bonus_sub_payload)
+            else:
+                start_point = active_sub.end_date if active_sub.end_date > now_utc else now_utc
+                new_end = start_point + timedelta(days=bonus_days)
+                updated_sub_model = await subscription_dal.update_subscription_end_date(
+                    session, active_sub.subscription_id, new_end
                 )
 
-            logging.info(
-                f"Subscription for user {user_id} extended by {bonus_days} days ({reason}). New end date: {new_end_date_obj}."
-            )
-            return new_end_date_obj
-        else:
-            logging.error(
-                f"Failed to update subscription end date locally for user {user_id}."
-            )
-            return None
+            if updated_sub_model:
+                # Синхронизируем на панели
+                panel_update_payload = self._build_panel_update_payload(
+                    expire_at=new_end,
+                    traffic_limit_bytes=(self.settings.user_traffic_limit_bytes if is_promo else None),
+                    include_uuid=False,
+                )
+                panel_ok = await self.panel_service.update_user_details_on_panel(panel_uuid, panel_update_payload)
+                if not panel_ok:
+                    logging.warning("Panel expiry update failed for %s after %s bonus. Local DB updated to %s.",
+                                    panel_uuid, reason, new_end)
+
+                if overall_latest_end is None or new_end > overall_latest_end:
+                    overall_latest_end = new_end
+            else:
+                logging.error("Failed to update subscription end date locally for user %s (panel %s).", user_id, panel_uuid)
+
+        return overall_latest_end
+
 
     async def get_active_subscription_details(
         self, session: AsyncSession, user_id: int
