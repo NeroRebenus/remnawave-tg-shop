@@ -205,8 +205,7 @@ class FermaClient:
         timezone = getattr(s, "FERMA_TIMEZONE", 0)
         timezone = int(timezone) if isinstance(timezone, (int, str)) and str(timezone).isdigit() else 0
         timezone = timezone if 1 <= timezone <= 11 else None
-        # (необяз.) GroupCode — часто 555 на тестовых стендах; в Settings нет, читаем из окружения
-        group_code = getattr(s, "FERMA_GROUP_CODE", None)
+
 
         # --- CallbackUrl (важно для колбэка Ferma) ---
         callback_url = getattr(s, "ferma_full_callback_url", None)
@@ -246,7 +245,6 @@ class FermaClient:
             **({"CallbackUrl": callback_url} if callback_url else {}),
             **({"IsInternet": True} if is_internet else {}),
             **({"Timezone": timezone} if timezone is not None else {}),
-            **({"GroupCode": group_code} if group_code else {}),
             **({"Data": {"PaymentIdentifiers": [payment_identifiers]}}
             if payment_identifiers else {}),
         }
