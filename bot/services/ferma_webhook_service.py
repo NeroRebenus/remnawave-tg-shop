@@ -185,6 +185,7 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
 
             if code == 2:  # CONFIRMED
                 await repo.mark_confirmed(pr, ofd_url)
+                await session.commit()
                 repo_action = "mark_confirmed"
                 branch = "confirmed"
 
@@ -196,11 +197,13 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
 
             elif code == 1:  # PROCESSED
                 await repo.mark_processed(pr)
+                await session.commit()
                 repo_action = "mark_processed"
                 branch = "processed"
 
             elif code == 3:  # KKT_ERROR
                 await repo.mark_kkt_error(pr, error=str(payload))
+                await session.commit()
                 repo_action = "mark_kkt_error"
                 branch = "kkt_error"
             else:

@@ -111,23 +111,35 @@ async def fiscalize_on_yookassa_succeeded(
                     description=description,
                     buyer_email=buyer_email,
                     buyer_phone=buyer_phone,
-                    payment_identifiers=payment_id,
+                    payment_identifiers=payment_id,  # для удобства сверки
                 )
+
                 receipt_id = send_result.get("receipt_id")
                 ferma_invoice_id = send_result.get("invoice_id") or invoice_id
 
-                # ВАЖНО: сохраняем ReceiptId; а InvoiceId — если Ferma вернула свой UUID
+                # Сохраняем ReceiptId и (если есть) настоящий InvoiceId Ferma
                 await repo.mark_sent(pr, receipt_id=receipt_id, new_invoice_id=ferma_invoice_id)
 
+                # ВАЖНО: фиксируем изменения до прихода колбэка
+                await session.commit()
+
                 result = {"ok": True, "receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
+
             except FermaError as e:
+                await session.rollback()
                 log.exception("Ferma error on send_income_receipt. invoice_id=%s", invoice_id)
                 await repo.mark_failed(pr, error=str(e))
+                # фиксируем статус ошибки, чтобы не болталась транзакция
+                await session.commit()
                 return {"ok": False, "error": "ferma_send_failed", "detail": str(e)}
+
             except Exception as e:
+                await session.rollback()
                 log.exception("Unexpected error on send_income_receipt. invoice_id=%s", invoice_id)
                 await repo.mark_failed(pr, error=str(e))
+                await session.commit()
                 return {"ok": False, "error": "unexpected_send_error", "detail": str(e)}
+
 
         # --- Шаг 3: fallback-опрос статуса (параллельно, вне транзакции)
         cfg = client.cfg
