@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Tuple
 
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +12,8 @@ from bot.middlewares.i18n import JsonI18n
 from db.dal import user_dal
 from db.dal.pricing import get_or_init_user_price_plan, update_user_price_plan
 from bot.keyboards.inline.admin_keyboards import get_back_to_admin_panel_keyboard
+
+from aiogram.exceptions import TelegramBadRequest
 
 router = Router(name="admin_user_price_router")
 
@@ -132,6 +134,7 @@ async def admin_user_price_prompt(
     await cb.answer()
 
 
+
 @router.message(AdminPriceStates.waiting_user_query)
 async def admin_user_price_got_query(
     msg: types.Message,
@@ -139,26 +142,52 @@ async def admin_user_price_got_query(
     session: AsyncSession,
     i18n_data: dict,
     settings: Settings,
+    bot: Bot,  # ⬅️ добавили
 ):
     _ = _t(i18n_data, settings)
     text = (msg.text or "").strip()
 
-    # распознаём id / @username
     user_id: Optional[int] = None
+
     if text.isdigit():
+        # ✅ Числовой ID — сразу берём, если нет в БД, ниже создадим
         user_id = int(text)
+
     elif text.startswith("@") and len(text) > 1:
+        # 1) пробуем из своей БД
         user = await user_dal.get_user_by_username(session, text[1:])
         if user:
             user_id = user.user_id
+        else:
+            # 2) пробуем спросить у Telegram — если юзер хотя бы раз писал боту
+            try:
+                chat = await bot.get_chat(text)  # "@username"
+                if chat and chat.type == "private" and chat.id:
+                    user_id = int(chat.id)
+                # если смогли вытащить ID — дальше создадим минимального юзера
+            except TelegramBadRequest:
+                pass
+            except Exception:
+                pass
+
     else:
-        # попробуем как username без @
+        # попробуем username без @
         user = await user_dal.get_user_by_username(session, text)
         if user:
             user_id = user.user_id
 
     if not user_id:
-        await msg.answer(_("admin_user_price_bad_id", default="Некорректный ID/username. Введите число или @username."))
+        # здесь username не резолвится; без ID создать нельзя
+        # поэтому просим ввести именно числовой ID, оставляя кнопку «В админку»
+        from bot.keyboards.inline.admin_keyboards import get_back_to_admin_panel_keyboard
+        kb = get_back_to_admin_panel_keyboard(
+            i18n_data.get("current_language", settings.DEFAULT_LANGUAGE),
+            i18n_data.get("i18n_instance"),
+        )
+        await msg.answer(
+            _("admin_user_price_bad_id", default="Некорректный ID/username. Введите число или @username (пользователь должен хотя бы раз написать боту)."),
+            reply_markup=kb
+        )
         return
 
     # Ensure user exists (если нет — создаём минимальную запись)
@@ -166,7 +195,8 @@ async def admin_user_price_got_query(
     if not db_user:
         data = {
             "user_id": user_id,
-            "username": None,
+            # если резолвили через get_chat — можно сохранить имя/username
+            "username": (text[1:] if text.startswith("@") else None),
             "first_name": None,
             "last_name": None,
             "language_code": i18n_data.get("current_language", settings.DEFAULT_LANGUAGE),
@@ -179,11 +209,9 @@ async def admin_user_price_got_query(
             await msg.answer(_("admin_user_price_create_user_failed", default=f"Ошибка создания пользователя: {e}"))
             return
 
-    # Ensure plan
     await get_or_init_user_price_plan(session, user_id=user_id)
     await session.flush()
 
-    # Переходим к меню цен
     await state.update_data(target_user_id=user_id)
     await _show_price_menu(msg, i18n_data, settings, session, user_id)
 
