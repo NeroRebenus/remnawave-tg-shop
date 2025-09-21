@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     FERMA_PAYMENT_METHOD: int = Field(default=4)                # способ расчёта: полный расчёт
     FERMA_MEASURE: str = Field(default="PIECE")                 # ФФД 1.2
     FERMA_TIMEZONE: int = Field(default=0, description="1..11; 0 — не передавать Timezone")
-    FERMA_GROUP_CODE: int = Field(default=None)
+    FERMA_GROUP_CODE: Optional[int] = Field(default=None)
     FERMA_CALLBACK_PATH: str = Field(default="/webhook/ferma", description="HTTP path for Ferma callback POST")
 
     # список доверенных подсетей (строкой), парсим ниже в вычисляемом свойстве
