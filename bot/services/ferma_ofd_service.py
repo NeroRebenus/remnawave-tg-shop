@@ -9,12 +9,7 @@ import logging, os
 
 import aiohttp
 
-try:
-    # Предпочитаем использовать общий singleton настроек проекта
-    from config.settings import Settings, get_settings
-except Exception:  # pragma: no cover
-    Settings = None  # type: ignore
-    get_settings = None  # type: ignore
+from config.settings import get_settings, Settings
 
 log = logging.getLogger("ferma")
 
@@ -135,13 +130,7 @@ class FermaClient:
         if cfg is not None:
             self.cfg = cfg
         else:
-            s = settings
-            if s is None and get_settings is not None:
-                # Подтянем общий singleton, если есть
-                try:
-                    s = get_settings()
-                except Exception:
-                    s = None
+            s = get_settings()
             self.cfg = FermaConfig.from_settings(s) if s is not None else FermaConfig.from_env_or_defaults()
 
         self._session = session
@@ -193,34 +182,17 @@ class FermaClient:
         Формируем простой чек прихода (Type="Income").
         Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
-        s = self.cfg  # настройки (get_settings)
+        s = get_settings()
 
         # --- строгая подготовка INN ---
         inn = (str(getattr(s, "FERMA_INN", "")).strip()
             or str(os.getenv("FERMA_INN", "")).strip())
-        if not inn.isdigit() or len(inn) not in (10, 12):
-            log.error("FERMA_INN is empty/invalid. Got: %r (settings=%r, env=%r)",
-                    inn, getattr(s, "FERMA_INN", None), os.getenv("FERMA_INN"))
-            raise FermaError(400, {"Status":"Failed","Error":{"Code":1007,"Message":f"ENV FERMA_INN is invalid: {inn!r}"}})
 
         log.info(
             "Ferma SEND: Inn=%r, Tax=%r, Base=%r",
             inn, getattr(s, "FERMA_TAXATION_SYSTEM", None), getattr(s, "FERMA_BASE_URL", None)
         )
 
-        if not inn.isdigit() or len(inn) not in (10, 12):
-            # Лог + корректное формирование FermaError (status, payload)
-            log.error("FERMA_INN invalid or not set. Got: %r", inn)
-            raise FermaError(
-                400,
-                {
-                    "Status": "Failed",
-                    "Error": {
-                        "Code": 1007,
-                        "Message": f"ENV FERMA_INN is invalid: {inn!r}",
-                    },
-                },
-            )
 
 
         # --- опциональная группа касс (на тесте часто нужна 555) ---
@@ -342,6 +314,7 @@ class FermaClient:
         customer_name: Optional[str],
     ) -> Dict[str, Any]:
         cr: Dict[str, Any] = {
+            "TaxationSystem": self.cfg.taxation_system,
             "CashlessPayments": [{
                 "PaymentSum": round(float(amount), 2),
                 "PaymentMethodFlag": "1",
