@@ -167,7 +167,6 @@ class FermaClient:
 
     # --------------------- public API ---------------------
 
-
     async def send_income_receipt(
         self,
         invoice_id: str,
@@ -178,93 +177,93 @@ class FermaClient:
         payment_identifiers: str | None = None,
     ) -> dict:
         """
-        POST /api/kkt/cloud/receipt  (Ferma)
-        Формируем простой чек прихода (Type="Income").
+        Формирует чек прихода (Type='Income') для Ferma Cloud KKT.
+        Все поля берутся из .env через Settings (self.cfg). Ничего не хардкодим.
         Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
+        import os
         s = get_settings()
 
-        # --- строгая подготовка INN ---
-        inn = (str(getattr(s, "FERMA_INN", "")).strip()
-            or str(os.getenv("FERMA_INN", "")).strip())
+        # --- Inn (обязателен) ---
+        inn = str(getattr(s, "FERMA_INN", "")).strip()
 
-        log.info(
-            "Ferma SEND: Inn=%r, Tax=%r, Base=%r",
-            inn, getattr(s, "FERMA_TAXATION_SYSTEM", None), getattr(s, "FERMA_BASE_URL", None)
-        )
-
-
-
-        # --- опциональная группа касс (на тесте часто нужна 555) ---
+        # --- Опциональные параметры из .env ---
+        # Тип налогообложения: Common|SimpleIn|SimpleInOut|Unified|UnifiedAgricultural|Patent
+        taxation = (getattr(s, "FERMA_TAXATION_SYSTEM", None) or "").strip() or None
+        # НДС: Vat20|Vat10|Vat0|VatNo
+        vat = getattr(s, "FERMA_VAT", "VatNo")
+        # Признак предмета расчёта и способ расчёта (обычно 4/4 для услуги/полный расчёт)
+        payment_type = int(getattr(s, "FERMA_PAYMENT_TYPE", 4))
+        payment_method = int(getattr(s, "FERMA_PAYMENT_METHOD", 4))
+        # Единица измерения (ФФД 1.2): PIECE и т.д.
+        measure = getattr(s, "FERMA_MEASURE", "PIECE")
+        # Признак интернет-торговли
+        is_internet = bool(getattr(s, "FERMA_IS_INTERNET", False))
+        # Адрес расчётов (при необходимости)
+        bill_address = (getattr(s, "FERMA_BILL_ADDRESS", None) or "").strip() or None
+        # Часовой пояс кассы (1..11), 0/пусто — не передавать
+        timezone = getattr(s, "FERMA_TIMEZONE", 0)
+        timezone = int(timezone) if isinstance(timezone, (int, str)) and str(timezone).isdigit() else 0
+        timezone = timezone if 1 <= timezone <= 11 else None
+        # (необяз.) GroupCode — часто 555 на тестовых стендах; в Settings нет, читаем из окружения
         group_code = getattr(s, "FERMA_GROUP_CODE", None)
-        if group_code is not None:
-            group_code = str(group_code).strip() or None
 
-        # --- собираем CustomerReceipt ---
-        customer_receipt = {
-            "Items": [
-                {
-                    "Label": (description or f"Оплата заказа {invoice_id}")[:128],
-                    "Price": float(amount),
-                    "Quantity": 1,
-                    "Amount": float(amount),
-                    "Vat": getattr(s, "FERMA_VAT", "VatNo"),
-                    "Measure": getattr(s, "FERMA_MEASURE", "PIECE"),
-                    "PaymentMethod": int(getattr(s, "FERMA_PAYMENT_METHOD", 4)),
-                    "PaymentType": int(getattr(s, "FERMA_PAYMENT_TYPE", 4)),
-                }
-            ],
-            "TotalSum": float(amount),
-            "TaxationSystem": getattr(s, "FERMA_TAXATION_SYSTEM", None),
-            "BillAddress": getattr(s, "FERMA_BILL_ADDRESS", None) or None,
-            "Email": buyer_email or None,
-            "Phone": buyer_phone or None,
+        # --- CallbackUrl (важно для колбэка Ferma) ---
+        callback_url = getattr(s, "ferma_full_callback_url", None)
+        if not callback_url and getattr(s, "WEBHOOK_BASE_URL", None):
+            base = s.WEBHOOK_BASE_URL.rstrip("/")
+            path = getattr(s, "ferma_callback_path", "/webhook/ferma")
+            callback_url = f"{base}{path}"
+
+        # --- CustomerReceipt (одной строкой на всю сумму) ---
+        total = float(amount)
+        item = {
+            "Label": (description or f"Оплата заказа {invoice_id}")[:128],
+            "Price": total,
+            "Quantity": 1,
+            "Amount": total,
+            "Vat": vat,
+            "Measure": measure,
+            "PaymentMethod": payment_method,
+            "PaymentType": payment_type,
         }
-        customer_receipt = {k: v for k, v in customer_receipt.items() if v is not None}
+        customer_receipt = {
+            "Items": [item],
+            "TotalSum": total,
+            # Эти поля добавим только если есть значения
+            **({"TaxationSystem": taxation} if taxation else {}),
+            **({"BillAddress": bill_address} if bill_address else {}),
+            **({"Email": buyer_email} if buyer_email else {}),
+            **({"Phone": buyer_phone} if buyer_phone else {}),
+        }
 
-        # --- корневой Request ---
-        request_obj = {
+        # --- Корневой Request ---
+        request_obj: dict = {
             "Inn": inn,
             "Type": "Income",
             "InvoiceId": invoice_id,
             "CustomerReceipt": customer_receipt,
-            "CallbackUrl": (
-                (getattr(s, "PUBLIC_BASE_URL", "").rstrip("/") + getattr(s, "FERMA_CALLBACK_PATH", "/webhook/ferma"))
-                if getattr(s, "PUBLIC_BASE_URL", None) else None
-            ),
+            **({"CallbackUrl": callback_url} if callback_url else {}),
+            **({"IsInternet": True} if is_internet else {}),
+            **({"Timezone": timezone} if timezone is not None else {}),
+            **({"GroupCode": group_code} if group_code else {}),
+            **({"Data": {"PaymentIdentifiers": [payment_identifiers]}}
+            if payment_identifiers else {}),
         }
-        if group_code:
-            request_obj["GroupCode"] = group_code  # ← важно для тестовой группы касс (555)
-
-        # internet-флаг по желанию
-        if str(getattr(s, "FERMA_IS_INTERNET", "false")).lower() == "true":
-            request_obj["IsInternet"] = True
-
-        if payment_identifiers:
-            request_obj["Data"] = {"PaymentIdentifiers": [payment_identifiers]}
-
         payload = {"Request": request_obj}
 
-        # --- отладочный лог фактического тела запроса ---
-        try:
-            import json as _json
-            log.info("Ferma SEND receipt: inn=%s, group=%s, invoice=%s, amount=%.2f, payload=%s",
-                    inn, group_code, invoice_id, float(amount),
-                    _json.dumps(payload, ensure_ascii=False)[:1200])
-        except Exception:
-            pass
-        log.info("Ferma SEND: Inn=%s, InvoiceId=%s, Amount=%.2f", inn, invoice_id, float(amount))
 
-        # --- вызов Ferma ---
+        # Вызов Ferma Cloud (self._post_json должен уметь подставлять токен при use_token=True)
         resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
         data = (resp or {}).get("Data") or resp or {}
 
         receipt_id = data.get("ReceiptId")
         ferma_invoice_id = data.get("InvoiceId")
         if not receipt_id:
-            raise FermaError(f"Invalid response from Ferma: {resp}")
+            raise FermaError(400, {"Status":"Failed","Error":{"Message":f"Invalid response from Ferma: {resp}"}})
 
         return {"receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
+
 
 
 

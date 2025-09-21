@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     FERMA_PAYMENT_METHOD: int = Field(default=4)                # способ расчёта: полный расчёт
     FERMA_MEASURE: str = Field(default="PIECE")                 # ФФД 1.2
     FERMA_TIMEZONE: int = Field(default=0, description="1..11; 0 — не передавать Timezone")
-
+    FERMA_GROUP_CODE: int = Field(default=None)
     FERMA_CALLBACK_PATH: str = Field(default="/webhook/ferma", description="HTTP path for Ferma callback POST")
 
     # список доверенных подсетей (строкой), парсим ниже в вычисляемом свойстве
@@ -441,17 +441,6 @@ def get_settings() -> Settings:
                 logging.warning(
                     "CRITICAL: YooKassa credentials (SHOP_ID or SECRET_KEY) are not set. Payments will not work."
                 )
-            import os
-            ferma_env_dump = {k: os.getenv(k) for k in os.environ.keys() if k.startswith("FERMA_")}
-            logging.warning("DEBUG: env(FERMA_*)=%r", ferma_env_dump)
-            logging.warning(
-                "DEBUG: settings.FERMA_* base=%r login=%r inn=%r tax=%r tz=%r",
-                _settings_instance.FERMA_BASE_URL,
-                _settings_instance.FERMA_LOGIN,
-                _settings_instance.FERMA_INN,
-                _settings_instance.FERMA_TAXATION_SYSTEM,
-                _settings_instance.FERMA_TIMEZONE,
-            )
 
             # --- FERMA sanity checks ---
             if any([
