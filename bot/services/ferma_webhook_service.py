@@ -3,14 +3,15 @@ import ipaddress
 import logging
 import os
 import json
-from typing import List, Callable, Awaitable, Any, Optional
+from typing import List, Any, Optional, Tuple
 
 from aiohttp import web
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.orm import sessionmaker
 
 from db.repositories.receipts_repo import ReceiptsRepo
 from db.models import ReceiptStatus, Payment
+from config.settings import get_settings  # NEW
 
 # Логгер модуля (и дубли на root.info для видимости при минимальной конфигурации логгера)
 log = logging.getLogger("webhook.ferma")
@@ -63,21 +64,14 @@ def _as_int_status(status_code: Any) -> Optional[int]:
     """
     if status_code is None:
         return None
-    # сначала попытка прямой int
     try:
         return int(status_code)
     except Exception:
         pass
     s = str(status_code).strip().upper()
-    mapping = {
-        "CONFIRMED": 2,
-        "PROCESSED": 1,
-        "KKT_ERROR": 3,
-        "NEW": 0,
-    }
+    mapping = {"CONFIRMED": 2, "PROCESSED": 1, "KKT_ERROR": 3, "NEW": 0}
     if s in mapping:
         return mapping[s]
-    # иногда присылают "2 " или " 2"
     try:
         return int(s)
     except Exception:
@@ -91,49 +85,74 @@ def _short(s: Any, limit: int = 600) -> str:
     except Exception:
         return str(s)[:limit]
 
+# --- выбор чата для отсылки чека ---
+
+async def _resolve_target_chat(
+    session,
+    pr,  # запись в receipts_repo
+) -> Tuple[Optional[int], str]:
+    """
+    Возвращает (chat_id, reason):
+      - если Payment.source == "admin_link" и задан LOG_CHAT_ID -> (LOG_CHAT_ID, "admin_link")
+      - иначе, если есть payment.user_id                       -> (user_id, "user")
+      - иначе, если задан LOG_CHAT_ID                          -> (LOG_CHAT_ID, "fallback_log")
+      - иначе                                                  -> (None, "none")
+    """
+    settings = get_settings()
+    log_chat_id = None
+    try:
+        if getattr(settings, "LOG_CHAT_ID", None):
+            log_chat_id = int(settings.LOG_CHAT_ID)
+    except Exception:
+        log_chat_id = None
+
+    payment_row = None
+
+    # 1) Пытаемся найти платёж по yookassa_payment_id
+    try:
+        q1 = select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
+        payment_row = (await session.execute(q1)).scalars().first()
+    except Exception:
+        payment_row = None
+
+    # 2) Альтернатива: provider='yookassa' + provider_payment_id
+    if not payment_row:
+        try:
+            if hasattr(Payment, "provider") and hasattr(Payment, "provider_payment_id"):
+                q2 = select(Payment).where(
+                    and_(Payment.provider == "yookassa", Payment.provider_payment_id == pr.payment_id)
+                )
+                payment_row = (await session.execute(q2)).scalars().first()
+        except Exception:
+            payment_row = None
+
+    # 3) Если есть source == admin_link -> слать в лог-чат
+    source = ""
+    try:
+        source = (getattr(payment_row, "source", None) or "").strip().lower() if payment_row else ""
+    except Exception:
+        source = ""
+
+    if source == "admin_link" and log_chat_id:
+        return log_chat_id, "admin_link"
+
+    # 4) Иначе попробуем пользователя
+    try:
+        if payment_row and getattr(payment_row, "user_id", None):
+            return int(payment_row.user_id), "user"
+    except Exception:
+        pass
+
+    # 5) Fallback: если не нашли пользователя, но есть лог-чат — туда
+    if log_chat_id:
+        return log_chat_id, "fallback_log"
+
+    return None, "none"
+
 # --- Фабрика хендлера ДЛЯ app.router.add_post ---
 
 def make_ferma_callback_handler(async_session_factory: sessionmaker):
     cidrs = _trusted_cidrs()
-
-    async def _notify_user_with_receipt(session, bot, pr, ofd_url) -> bool:
-        """
-        pr.payment_id — это наш «связующий» идентификатор (обычно YooKassa payment_id).
-        Поищем пользователя по двум полям: yookassa_payment_id ИЛИ provider_payment_id='yookassa'.
-        """
-        from sqlalchemy import select, or_, and_
-        from db.models import Payment
-
-        # 1) по yookassa_payment_id
-        q1 = select(Payment).where(Payment.yookassa_payment_id == pr.payment_id)
-        res = (await session.execute(q1)).scalars().first()
-        if not res:
-            # 2) fallback: по паре (provider='yookassa', provider_payment_id=...)
-            try:
-                q2 = select(Payment).where(
-                    and_(
-                        getattr(Payment, "provider", None) == "yookassa",
-                        getattr(Payment, "provider_payment_id", None) == pr.payment_id
-                    )
-                )
-                res = (await session.execute(q2)).scalars().first()
-            except Exception:
-                res = None
-
-        if not res or not getattr(res, "user_id", None):
-            logging.warning("Ferma webhook: cannot map receipt to user (payment_id=%s)", pr.payment_id)
-            return False
-
-        try:
-            await bot.send_message(
-                chat_id=res.user_id,
-                text=f"🧾 Ваш чек сформирован: {ofd_url}",
-                disable_web_page_preview=True,
-            )
-            return True
-        except Exception:
-            logging.exception("Failed to send receipt message to user_id=%s", res.user_id)
-            return False
 
     async def ferma_callback(request: web.Request) -> web.Response:
         if not _ip_allowed(request, cidrs):
@@ -150,7 +169,10 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
         device = data.get("Device") or {}
         ofd_url = device.get("OfdReceiptUrl")
 
-        logging.info("Ferma webhook IN: status=%r invoice=%r receipt=%r ofd=%r", status_code, invoice_id, receipt_id, ofd_url)
+        logging.info(
+            "Ferma webhook IN: status=%r invoice=%r receipt=%r ofd=%r",
+            status_code, invoice_id, receipt_id, ofd_url
+        )
 
         async with async_session_factory() as session:
             repo = ReceiptsRepo(session)
@@ -167,20 +189,17 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
                 pr = await repo.get_by_invoice_id(invoice_id)
 
             if not pr:
-                logging.info("Ferma webhook: unknown invoice/receipt (ignored). invoice=%s receipt=%s", invoice_id, receipt_id)
+                logging.info(
+                    "Ferma webhook: unknown invoice/receipt (ignored). invoice=%s receipt=%s",
+                    invoice_id, receipt_id
+                )
                 return web.json_response({"ok": True, "ignored": True, "reason": "unknown_invoice"})
 
             # Нормализуем код статуса
-            code = None
-            try:
-                code = int(status_code)
-            except Exception:
-                s = str(status_code).strip().upper()
-                m = {"NEW": 0, "PROCESSED": 1, "CONFIRMED": 2, "KKT_ERROR": 3}
-                code = m.get(s)
+            code = _as_int_status(status_code)
 
             branch = "unknown"
-            user_notified = False
+            notified = False
             repo_action = None
 
             if code == 2:  # CONFIRMED
@@ -191,9 +210,29 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
 
                 bot = request.app.get("bot")
                 if not bot:
-                    logging.warning("Ferma webhook: app['bot'] is missing; cannot notify user")
+                    logging.warning("Ferma webhook: app['bot'] is missing; cannot notify")
                 elif ofd_url:
-                    user_notified = await _notify_user_with_receipt(session, bot, pr, ofd_url)
+                    # NEW: единый выбор маршрута (LOG_CHAT_ID для admin_link, иначе user, иначе fallback в LOG_CHAT_ID)
+                    target_chat_id, reason = await _resolve_target_chat(session, pr)
+                    if target_chat_id:
+                        try:
+                            await bot.send_message(
+                                chat_id=target_chat_id,
+                                text=f"🧾 Чек сформирован: {ofd_url}",
+                                disable_web_page_preview=True,
+                            )
+                            notified = True
+                            logging.info(
+                                "Ferma webhook: receipt sent to %s (chat_id=%s)",
+                                reason, target_chat_id
+                            )
+                        except Exception:
+                            logging.exception("Failed to send receipt message (reason=%s, chat_id=%s)", reason, target_chat_id)
+                    else:
+                        logging.warning(
+                            "Ferma webhook: cannot map receipt to user or log chat (payment_id=%s)",
+                            pr.payment_id
+                        )
 
             elif code == 1:  # PROCESSED
                 await repo.mark_processed(pr)
@@ -216,13 +255,11 @@ def make_ferma_callback_handler(async_session_factory: sessionmaker):
             "invoice_id": invoice_id,
             "receipt_id": receipt_id,
             "has_ofd_url": bool(ofd_url),
-            "user_notified": bool(user_notified),
+            "notified": bool(notified),
             "repo_action": repo_action,
         })
 
     return ferma_callback
-
-
 
 
 # --- (опционально) Старая версия под app.add_routes(routes) ---
