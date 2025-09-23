@@ -335,9 +335,8 @@ class YooKassaService:
                 if k not in metadata:
                     metadata[k] = v
 
-        description = f"Оплата подписки Remnawave: {period} | tg_id={tg_id}"
-        if comment:
-            description += f" | {comment}"
+        description = f"Оплата подписки на {period[:-1]} мес."
+
 
         # 5) Чек (сохраняем твою логику VAT/mode/subject)
         receipt_items_list: List[Dict[str, Any]] = [{
