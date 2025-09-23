@@ -8,7 +8,7 @@ from yookassa.domain.request.payment_request_builder import PaymentRequestBuilde
 from yookassa.domain.common.confirmation_type import ConfirmationType
 
 from config.settings import Settings
-
+from datetime import datetime, timedelta, timezone 
 
 class YooKassaService:
 
@@ -277,3 +277,122 @@ class YooKassaService:
         except Exception as e:
             logging.error(f"Failed to cancel YooKassa payment {payment_id_in_yookassa}: {e}")
             return False
+
+    async def create_admin_payment_link(
+        self,
+        *,
+        tg_id: int,
+        period: str,
+        amount_rub: float,
+        comment: Optional[str] = None,
+        ttl_minutes: int = 120,
+        receipt_email: Optional[str] = None,
+        receipt_phone: Optional[str] = None,
+        return_url_override: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Создаёт платёж YooKassa и возвращает объект с confirmation_url для передачи клиенту.
+        НЕ ломает текущий флоу — отдельный метод для admin-link.
+        """
+        if not self.configured:
+            logging.error("YooKassa is not configured. Cannot create admin payment link.")
+            return None
+
+        if not self.settings:
+            logging.error("YooKassaService: Settings object not available.")
+            return {"error": True, "internal_message": "Settings object is missing."}
+
+        # 1) Контакты покупателя для чека (как в create_payment)
+        customer_contact_for_receipt: Dict[str, Any] = {}
+        if receipt_email:
+            customer_contact_for_receipt["email"] = receipt_email
+        elif receipt_phone:
+            customer_contact_for_receipt["phone"] = receipt_phone
+        elif self.settings.YOOKASSA_DEFAULT_RECEIPT_EMAIL:
+            customer_contact_for_receipt["email"] = self.settings.YOOKASSA_DEFAULT_RECEIPT_EMAIL
+        else:
+            logging.error("No email/phone for receipt and no default email configured.")
+            return {"error": True, "internal_message": "Receipt customer contact missing."}
+
+        # 2) Return URL
+        return_url = (return_url_override or self.return_url)
+
+        # 3) expires_at
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(minutes=int(ttl_minutes))
+
+        # 4) Метаданные
+        metadata: Dict[str, Any] = {
+            "tg_id": str(tg_id),
+            "period": period,
+            "source": "admin_link",
+            "comment": comment or "",
+        }
+        if extra_metadata:
+            # аккуратно мерджим, не перетирая базовые ключи
+            for k, v in extra_metadata.items():
+                if k not in metadata:
+                    metadata[k] = v
+
+        description = f"Оплата подписки Remnawave: {period} | tg_id={tg_id}"
+        if comment:
+            description += f" | {comment}"
+
+        # 5) Чек (сохраняем твою логику VAT/mode/subject)
+        receipt_items_list: List[Dict[str, Any]] = [{
+            "description": description[:128],
+            "quantity": "1.00",
+            "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
+            "vat_code": str(self.settings.YOOKASSA_VAT_CODE),
+            "payment_mode": getattr(self.settings, 'yk_receipt_payment_mode', self.settings.YOOKASSA_PAYMENT_MODE),
+            "payment_subject": getattr(self.settings, 'yk_receipt_payment_subject', self.settings.YOOKASSA_PAYMENT_SUBJECT),
+        }]
+        receipt_data_dict: Dict[str, Any] = {"customer": customer_contact_for_receipt, "items": receipt_items_list}
+
+        # 6) Тело платежа (через dict — гарантированно поддерживает expires_at/confirmation/metadata)
+        payload: Dict[str, Any] = {
+            "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
+            "capture": True,
+            "confirmation": {"type": "redirect", "return_url": return_url},
+            "description": description[:127],
+            "metadata": metadata,
+            "receipt": receipt_data_dict,
+            "expires_at": expires_at.isoformat(),
+        }
+
+        idempotence_key = str(uuid.uuid4())
+        try:
+            logging.info(
+                f"Creating admin YooKassa payment (Idempotence-Key: {idempotence_key}). "
+                f"Amount: {amount_rub} RUB. Metadata: {metadata}. ExpiresAt: {payload['expires_at']}"
+            )
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None, lambda: YooKassaPayment.create(payload, idempotence_key)
+            )
+
+            logging.info(
+                f"Admin link created: ID={response.id}, Status={response.status}, Paid={response.paid}"
+            )
+
+            return {
+                "id": response.id,
+                "confirmation_url": response.confirmation.confirmation_url if response.confirmation else None,
+                "status": response.status,
+                "metadata": response.metadata,
+                "amount_value": float(response.amount.value),
+                "amount_currency": response.amount.currency,
+                "idempotence_key_used": idempotence_key,
+                "paid": response.paid,
+                "refundable": response.refundable,
+                "created_at": response.created_at.isoformat() if hasattr(response.created_at, 'isoformat') else str(response.created_at),
+                "description_from_yk": response.description,
+                "test_mode": getattr(response, 'test', None),
+                "payment_method": getattr(response, 'payment_method', None),
+                "expires_at": payload["expires_at"],
+                "return_url": return_url,
+            }
+        except Exception as e:
+            logging.error(f"YooKassa admin payment creation failed: {e}", exc_info=True)
+            return None
