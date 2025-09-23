@@ -64,8 +64,19 @@ async def fiscalize_on_yookassa_succeeded(
         buyer_email = _safe_strip(cust.get("email"))
         buyer_phone = _safe_strip(cust.get("phone"))
 
-        # Если email/phone отсутствуют, можно подставить дефолтный email из настроек
+        # NEW: извлекаем metadata, чтобы понять источник платежа и маршрут для отправки чека  # <<<
+        metadata = obj.get("metadata") or {}  # <<<
+        source = (metadata.get("source") or "").strip().lower()  # <<<
         s = get_settings()
+        # Если платёж создан через админскую ссылку И задан LOG_CHAT_ID — шлём чек туда  # <<<
+        route_chat_id: Optional[int] = None  # <<<
+        try:  # <<<
+            if source == "admin_link" and getattr(s, "LOG_CHAT_ID", None):  # <<<
+                route_chat_id = int(s.LOG_CHAT_ID)  # <<<
+        except Exception:  # <<<
+            route_chat_id = None  # <<<
+
+        # Если email/phone отсутствуют, можно подставить дефолтный email из настроек
         if not buyer_email and getattr(s, "YOOKASSA_DEFAULT_RECEIPT_EMAIL", None):
             buyer_email = s.YOOKASSA_DEFAULT_RECEIPT_EMAIL
 
@@ -143,7 +154,8 @@ async def fiscalize_on_yookassa_succeeded(
 
         # --- Шаг 3: fallback-опрос статуса (параллельно, вне транзакции)
         cfg = client.cfg
-        asyncio.create_task(_fallback_poll_status(async_session_factory, client, invoice_id, cfg))
+        # NEW: передаём маршрут (route_chat_id) в фоновую задачу                 # <<<
+        asyncio.create_task(_fallback_poll_status(async_session_factory, client, invoice_id, cfg, route_chat_id))  # <<<
 
         return result
 
@@ -158,7 +170,8 @@ async def _fallback_poll_status(
     async_session_factory: sessionmaker,
     client: FermaClient,
     invoice_id: str,
-    cfg
+    cfg,
+    route_chat_id: Optional[int] = None,   # NEW: куда слать чек, если это admin_link   # <<<
 ) -> None:
     """
     Периодически опрашивает Ferma по invoice_id и обновляет запись в БД,
@@ -193,7 +206,7 @@ async def _fallback_poll_status(
                     await repo.mark_confirmed(pr, ofd_url)
                     log.info("Fallback confirmed: invoice_id=%s ofd=%s", invoice_id, ofd_url)
 
-                    # попытаемся уведомить юзера
+                    # Уведомляем: в LOG_CHAT_ID для admin_link, иначе пользователю
                     try:
                         from sqlalchemy import select, and_
                         from db.models import Payment
@@ -207,14 +220,33 @@ async def _fallback_poll_status(
                                     select(Payment).where(and_(Payment.provider == "yookassa", Payment.provider_payment_id == pr.payment_id))
                                 )
                                 payment_row = q2.scalars().first()
-                            if payment_row and payment_row.user_id and ofd_url:
-                                await bot.send_message(payment_row.user_id, f"🧾 Ваш чек сформирован: {ofd_url}", disable_web_page_preview=True)
+
+                            # Куда отправлять:
+                            target_chat_id: Optional[int] = None
+                            if route_chat_id:
+                                # Если это админская ссылка и LOG_CHAT_ID задан — шлём в лог-чат
+                                target_chat_id = route_chat_id
+                            else:
+                                # Иначе как раньше — пользователю (если есть user_id)
+                                if payment_row and payment_row.user_id:
+                                    target_chat_id = int(payment_row.user_id)
+
+                            if target_chat_id and ofd_url:
+                                await bot.send_message(
+                                    target_chat_id,
+                                    f"🧾 Чек сформирован: {ofd_url}",
+                                    disable_web_page_preview=True
+                                )
+                            else:
+                                log.warning(
+                                    "Receipt ready, but nowhere to send (route_chat_id=%s, user_id=%s).",
+                                    route_chat_id, getattr(payment_row, "user_id", None)
+                                )
                         finally:
                             await bot.session.close()
                     except Exception:
-                        log.exception("Fallback: failed to notify user about receipt")
+                        log.exception("Fallback: failed to notify about receipt")
                     return
-
 
                 elif status_code == 1:  # PROCESSED (в обработке)
                     await repo.mark_processed(pr)
