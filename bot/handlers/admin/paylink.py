@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.settings import Settings
 from bot.middlewares.i18n import JsonI18n
 from db.dal.pricing import get_or_init_user_price_plan
-from bot.services.yookassa_service import create_manual_invoice_link
+from bot.services.yookassa_service import create_admin_payment_link
 
 router = Router(name="admin_paylink_router")
 
@@ -59,7 +59,7 @@ async def cmd_paylink(message: types.Message, session: AsyncSession, i18n: JsonI
     amount_rub = int(price_map[months])
 
     # 3) Создаём ссылку оплаты
-    confirmation_url = await create_manual_invoice_link(
+    confirmation_url = await create_admin_payment_link(
         tg_id=tg_id,
         period=period,
         amount_rub=amount_rub,
