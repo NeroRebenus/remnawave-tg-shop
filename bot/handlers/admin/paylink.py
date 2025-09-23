@@ -10,7 +10,6 @@ from aiogram.filters import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import Settings
-from bot.middlewares.i18n import JsonI18n
 
 from db.dal.pricing import get_or_init_user_price_plan
 from bot.services.yookassa_service import YooKassaService
@@ -133,7 +132,6 @@ def _price_from_plan(user_plan, months: int) -> Optional[float]:
 async def cmd_paylink(
     message: types.Message,
     session: AsyncSession,
-    i18n: JsonI18n,
     settings: Settings,
 ):
     """
