@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
 
-from aiogram import Router, types, F
+from aiogram import Router, types
 from aiogram.filters import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,7 +37,6 @@ def _get_yk_service(settings: Settings, bot_username: Optional[str]) -> YooKassa
 
 
 def _is_admin(user_id: int, settings: Settings) -> bool:
-    # Поддержим оба возможных названия из настроек
     admin_ids = (
         getattr(settings, "ADMIN_TG_IDS", None)
         or getattr(settings, "ADMIN_IDS", None)
@@ -49,34 +48,39 @@ def _is_admin(user_id: int, settings: Settings) -> bool:
         return False
 
 
-def _parse_cmd(text: str) -> Optional[Dict]:
+def _parse_cmd(text: str) -> Optional[Dict[str, Union[int, str, float, None]]]:
     """
-    Парсим:
-      /paylink <tg_id> <period> [comment ...] [amount=XXXX] [ttl=MIN]
+    Поддерживаем два варианта первого аргумента:
+      /paylink <tg_id|@username> <period> [comment ...] [amount=XXXX] [ttl=MIN]
 
-    Пример:
+    Примеры:
       /paylink 123456789 3m Клиент Иван amount=1990 ttl=90
+      /paylink @panel_nick 6m Оплата от менеджера amount=3490
     """
     if not text:
         return None
     parts = text.strip().split(maxsplit=3)
     if len(parts) < 3:
         return None
-    _, tg_id_str, period = parts[:3]
+
+    _, id_part, period = parts[:3]
     rest = parts[3] if len(parts) == 4 else ""
 
+    # id_part может быть числом (tg_id) или ником (@username / username)
+    tg_id: Optional[int] = None
+    username: Optional[str] = None
     try:
-        tg_id = int(tg_id_str)
+        tg_id = int(id_part)
     except ValueError:
-        return None
+        username = id_part.lstrip("@").lower()
+
     if period not in PERIOD_MAP:
         return None
 
-    # Опциональные ключи в хвосте
+    # Опциональные ключи: amount=XXXX и ttl=YYY
     amount_override: Optional[float] = None
     ttl_minutes: Optional[int] = None
 
-    # Ищем amount=XXXX и ttl=YYY в конце строки (могут быть в любой последовательности)
     amount_match = re.search(r"(?:^|\s)amount=(\d+(?:[.,]\d{1,2})?)\b", rest)
     ttl_match = re.search(r"(?:^|\s)ttl=(\d{1,5})\b", rest)
 
@@ -86,7 +90,6 @@ def _parse_cmd(text: str) -> Optional[Dict]:
             amount_override = float(amount_str)
         except ValueError:
             amount_override = None
-        # вырезаем из комментария
         rest = (rest[:amount_match.start()] + rest[amount_match.end():]).strip()
 
     if ttl_match:
@@ -99,7 +102,8 @@ def _parse_cmd(text: str) -> Optional[Dict]:
     comment = rest.strip() or None
 
     return {
-        "tg_id": tg_id,
+        "tg_id": tg_id,                 # None если указан username
+        "username": username,           # None если указан tg_id
         "period": period,
         "comment": comment,
         "amount_override": amount_override,
@@ -135,45 +139,76 @@ async def cmd_paylink(
     settings: Settings,
 ):
     """
-    Создать платёжную ссылку YooKassa для клиента по tg_id и периоду.
-    Команда только для админов.
+    Создать платёжную ссылку YooKassa для клиента:
+      /paylink <tg_id|@username> <period> [comment] [amount=XXXX] [ttl=MIN]
 
-    Использование:
-      /paylink <tg_id> <period> [comment] [amount=XXXX] [ttl=MIN]
-    Периоды:
-      1m, 3m, 6m, 12m
+    Периоды: 1m, 3m, 6m, 12m
+
+    Правила:
+    - Если передан tg_id: цена берётся из прайс-плана пользователя (можно переопределить amount=...)
+    - Если передан @username панели: ОБЯЗАТЕЛЕН параметр amount=..., т.к. прайс-плана в БД бота может не быть.
+      В метаданные будет добавлено id_type=panel_username и username=<ник>.
     """
-    # 0) Проверка прав
     if not _is_admin(message.from_user.id, settings):
-        return await message.answer("Недостаточно прав.")
+        await message.answer("Недостаточно прав.")
+        return
 
     parsed = _parse_cmd(message.text or "")
     if not parsed:
-        return await message.answer(
+        await message.answer(
             "Использование:\n"
-            "/paylink <tg_id> <period> [comment] [amount=XXXX] [ttl=MIN]\n"
+            "/paylink <tg_id|@username> <period> [comment] [amount=XXXX] [ttl=MIN]\n"
             "Примеры:\n"
             "  /paylink 123456789 3m Клиент Иван\n"
+            "  /paylink @panel_nick 6m Оплата от менеджера amount=3490\n"
             "  /paylink 123456789 12m VIP клиент amount=4990 ttl=180"
         )
+        return
 
-    tg_id = parsed["tg_id"]
-    period = parsed["period"]
-    comment = parsed["comment"]
-    amount_override = parsed["amount_override"]
-    ttl_minutes = parsed["ttl_minutes"] or 120
+    tg_id: Optional[int] = parsed["tg_id"]  # может быть None
+    username: Optional[str] = parsed["username"]  # может быть None
+    period: str = parsed["period"]  # гарантированно из PERIOD_MAP
+    comment: Optional[str] = parsed["comment"]
+    amount_override: Optional[float] = parsed["amount_override"]
+    ttl_minutes: int = parsed["ttl_minutes"] or 120
 
     months = PERIOD_MAP[period]
 
-    # 1) Прайс-план пользователя (или создаём дефолтный)
-    user_plan = await get_or_init_user_price_plan(session, tg_id)
-    if not user_plan:
-        return await message.answer("Не удалось получить прайс-план пользователя.")
+    amount_rub: Optional[float] = None
+    extra_metadata: Dict[str, object] = {
+        "months": months,
+        "admin_initiator_id": str(message.from_user.id),
+    }
 
-    # 2) Цена: из плана или переопределённая
-    amount_rub: Optional[float] = amount_override or _price_from_plan(user_plan, months)
-    if amount_rub is None:
-        return await message.answer("Цена для выбранного периода не найдена.")
+    # Режим 1: указан tg_id -> берём цену из прайс-плана (или override)
+    if tg_id is not None:
+        user_plan = await get_or_init_user_price_plan(session, tg_id)
+        if not user_plan:
+            await message.answer("Не удалось получить прайс-план пользователя.")
+            return
+        amount_rub = amount_override or _price_from_plan(user_plan, months)
+        if amount_rub is None:
+            await message.answer("Цена для выбранного периода не найдена.")
+            return
+        # В этом режиме можно оставить идентификацию по tg_id (если вдруг пригодится где-то ещё)
+        # Но для админ-линков мы теперь ориентируемся по нику панели, поэтому tg_id в metadata не обязателен.
+        # Оставим совместимость: запишем tg_id как справочный.
+        extra_metadata["tg_id"] = str(tg_id)
+
+    # Режим 2: указан username панели -> обязателен amount=...
+    elif username:
+        if amount_override is None:
+            await message.answer(
+                "Для ссылок по нику панели укажите цену, например:\n"
+                f"/paylink @{username} {period} Комментарий amount=1990"
+            )
+            return
+        amount_rub = amount_override
+        extra_metadata["id_type"] = "panel_username"
+        extra_metadata["username"] = username  # уже нормализован (без @, lower)
+    else:
+        await message.answer("Укажите tg_id или @username в качестве первого аргумента.")
+        return
 
     # 3) Инициализация сервиса YooKassa
     bot_username = message.bot.username if hasattr(message.bot, "username") else None
@@ -182,32 +217,36 @@ async def cmd_paylink(
     # 4) Создаём платёж с confirmation_url
     try:
         result = await yk.create_admin_payment_link(
-            tg_id=tg_id,
+            tg_id=tg_id or 0,  # не используется в логике admin_link по нику, но параметр обязателен
             period=period,
             amount_rub=amount_rub,
             comment=comment,
             ttl_minutes=ttl_minutes,
-            # Если у тебя в админке есть мейл клиента — передай его сюда:
             receipt_email=None,
             receipt_phone=None,
-            # Можно переопределить return_url при необходимости:
             return_url_override=None,
-            extra_metadata={
-                "months": months,
-                "admin_initiator_id": str(message.from_user.id),
-            },
+            extra_metadata=extra_metadata,
         )
     except Exception as e:
         logging.exception("create_admin_payment_link failed")
-        return await message.answer(f"Ошибка при создании ссылки: {e}")
+        await message.answer(f"Ошибка при создании ссылки: {e}")
+        return
 
     if not result or not result.get("confirmation_url"):
-        return await message.answer("Не удалось создать ссылку оплаты (проверьте логи).")
+        await message.answer("Не удалось создать ссылку оплаты (проверьте логи).")
+        return
 
     url = result["confirmation_url"]
+
+    # Текст подтверждения с учётом режима
+    if tg_id is not None:
+        header = f"👤 tg_id: <code>{tg_id}</code>\n"
+    else:
+        header = f"👤 username (панель): <b>@{username}</b>\n"
+
     await message.answer(
         "Ссылка на оплату создана ✅\n\n"
-        f"👤 tg_id: <code>{tg_id}</code>\n"
+        + header +
         f"📦 период: <b>{period}</b>\n"
         f"💰 сумма: <b>{amount_rub:.2f} RUB</b>\n"
         f"⏳ срок действия: ~{ttl_minutes} мин.\n"

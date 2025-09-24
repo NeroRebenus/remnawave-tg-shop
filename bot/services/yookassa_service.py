@@ -324,7 +324,7 @@ class YooKassaService:
 
         # 4) Метаданные
         metadata: Dict[str, Any] = {
-            "tg_id": str(tg_id),
+            "username": "<panel_nick_without_@_lowercase>",
             "period": period,
             "source": "admin_link",
             "comment": comment or "",
