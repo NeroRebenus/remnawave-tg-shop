@@ -324,11 +324,12 @@ class YooKassaService:
 
         # 4) Метаданные
         metadata: Dict[str, Any] = {
-            "username": "<panel_nick_without_@_lowercase>",
             "period": period,
             "source": "admin_link",
             "comment": comment or "",
         }
+        if extra_metadata:
+            metadata.update(extra_metadata)
         if extra_metadata:
             # аккуратно мерджим, не перетирая базовые ключи
             for k, v in extra_metadata.items():
