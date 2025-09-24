@@ -65,6 +65,116 @@ async def get_payments_with_pagination(session: AsyncSession, page: int = 0,
 
     return payments, total_count
 
+# --- NEW: admin_link by panel username -> extend in Panel
+async def process_adminlink_panel_username_payment(
+    payment_info_from_webhook: dict,
+    panel_service,
+    settings: Settings,
+    bot: Bot,
+) -> bool:
+    """
+    Автоматическое продление подписки в ПАНЕЛИ по никe (username) из metadata.
+    Возвращает True при успешном продлении в панели.
+    """
+    md = payment_info_from_webhook.get("metadata", {}) or {}
+    source = (md.get("source") or "").strip().lower()
+    id_type = (md.get("id_type") or "").strip().lower()
+    username_raw = (md.get("username") or md.get("panel_username") or "").strip()
+
+    if source != "admin_link" or not username_raw:
+        return False
+    if id_type not in {"panel_username", "username", ""}:
+        # не наш режим
+        return False
+
+    # Нормализуем ник панели: без @ и в нижнем регистре
+    panel_username = username_raw.lstrip("@").lower()
+
+    # Месяцы: либо months, либо period ("3m" и т.п.)
+    months = 0
+    months_raw = md.get("months")
+    try:
+        months = int(str(months_raw)) if months_raw is not None else 0
+    except Exception:
+        months = 0
+    if months <= 0:
+        period = str(md.get("period") or "").lower().strip()
+        months = {"1m": 1, "3m": 3, "6m": 6, "12m": 12}.get(period, 0)
+
+    if months <= 0:
+        logging.error("AdminLink(panel_username): bad months/period in metadata: %s", md)
+        return False
+
+    yk_payment_id = payment_info_from_webhook.get("id")
+    amount = (payment_info_from_webhook.get("amount") or {}).get("value")
+    currency = (payment_info_from_webhook.get("amount") or {}).get("currency")
+
+    # Пытаемся продлить в панели по нику
+    try:
+        ok = False
+        # Предпочтительно — прямой метод
+        if hasattr(panel_service, "extend_subscription_by_username"):
+            ok = await panel_service.extend_subscription_by_username(
+                username=panel_username,
+                months=months,
+                reason=f"YK admin_link {yk_payment_id}",
+            )
+        else:
+            # Fallback: найти uuid по нику и продлить по uuid
+            panel_uuid = None
+            if hasattr(panel_service, "get_user_uuid_by_username"):
+                panel_uuid = await panel_service.get_user_uuid_by_username(panel_username)
+            if not panel_uuid:
+                logging.error("AdminLink(panel_username): panel user not found by username=%s", panel_username)
+                return False
+
+            if hasattr(panel_service, "extend_subscription_by_uuid"):
+                ok = await panel_service.extend_subscription_by_uuid(
+                    user_uuid=panel_uuid,
+                    months=months,
+                    reason=f"YK admin_link {yk_payment_id}",
+                )
+            else:
+                # Последний шанс: общий extend (если есть)
+                if hasattr(panel_service, "extend_subscription"):
+                    ok = await panel_service.extend_subscription(
+                        identifier=panel_uuid,
+                        months=months,
+                        reason=f"YK admin_link {yk_payment_id}",
+                    )
+                else:
+                    logging.error("AdminLink(panel_username): no suitable PanelApiService method to extend")
+                    return False
+
+        if not ok:
+            logging.error("AdminLink(panel_username): panel extension returned False for @%s", panel_username)
+            return False
+
+        # Лог-уведомление в служебный чат
+        try:
+            if getattr(settings, "LOG_CHAT_ID", None):
+                await bot.send_message(
+                    int(settings.LOG_CHAT_ID),
+                    (
+                        "✅ Продлена подписка в ПАНЕЛИ (admin_link)\n"
+                        f"👤 @{panel_username}\n"
+                        f"🕒 +{months} мес.\n"
+                        f"💳 {amount} {currency}\n"
+                        f"🧾 YK: <code>{yk_payment_id}</code>"
+                    ),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+        except Exception:
+            # не критично
+            pass
+
+        logging.info("AdminLink(panel_username): extended in panel: @%s +%s mo (YK %s)", panel_username, months, yk_payment_id)
+        return True
+
+    except Exception:
+        logging.exception("AdminLink(panel_username): panel extension failed for @%s", panel_username)
+        return False
 
 def format_payment_text(payment: Payment, i18n: JsonI18n, lang: str) -> str:
     """Format single payment info as text."""

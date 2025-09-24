@@ -22,6 +22,7 @@ from bot.middlewares.i18n import JsonI18n
 from config.settings import Settings
 from bot.services.notification_service import NotificationService
 from bot.keyboards.inline.user_keyboards import get_connect_and_main_keyboard
+from bot.utils.date_utils import add_months
 
 # --- NEW: фискализация Ferma
 from bot.services.fiscalization_service import fiscalize_on_yookassa_succeeded
@@ -466,69 +467,140 @@ async def yookassa_webhook_route(request: web.Request):
             async with async_session_factory() as session:
                 try:
                     if notification_object.event == YOOKASSA_EVENT_PAYMENT_SUCCEEDED:
-                        if payment_dict_for_processing.get(
-                                "paid") and payment_dict_for_processing.get(
-                                    "status") == "succeeded":
-                            await process_successful_payment(
-                                session, bot, payment_dict_for_processing,
-                                i18n_instance, settings, panel_service,
-                                subscription_service, referral_service)
-                            await session.commit()
+                        if notification_object.event == YOOKASSA_EVENT_PAYMENT_SUCCEEDED:
+                            if payment_dict_for_processing.get("paid") and payment_dict_for_processing.get("status") == "succeeded":
+                                meta = payment_dict_for_processing.get("metadata", {}) or {}
+                                source = (meta.get("source") or "").strip().lower()
+                                id_type = (meta.get("id_type") or "").strip().lower()
+                                username_raw = (meta.get("username") or meta.get("panel_username") or "").strip()
 
-                            # ------------------------- FERMA FISCALIZATION -------------------------
-                            try:
-                                # Подготовим минимальный payload в формате YooKassa
-                                # Заполним email из настроек, если ничего другого нет
-                                metadata = payment_dict_for_processing.get("metadata", {}) or {}
-                                user_id_str = metadata.get("user_id")
-                                buyer_email = settings.YOOKASSA_DEFAULT_RECEIPT_EMAIL
-                                buyer_phone = None
+                                # months из metadata или из period
+                                months = 0
+                                months_raw = meta.get("months")
+                                try:
+                                    months = int(str(months_raw)) if months_raw is not None else 0
+                                except Exception:
+                                    months = 0
+                                if months <= 0:
+                                    period = str(meta.get("period") or "").lower().strip()
+                                    months = {"1m": 1, "3m": 3, "6m": 6, "12m": 12}.get(period, 0)
 
-                                # Если хочешь тянуть телефон/email из своей БД — можно:
-                                # if user_id_str and str(user_id_str).isdigit():
-                                #     db_user = await user_dal.get_user_by_id(session, int(user_id_str))
-                                #     if db_user and getattr(db_user, "email", None):
-                                #         buyer_email = db_user.email
-                                #     if db_user and getattr(db_user, "phone", None):
-                                #         buyer_phone = db_user.phone
+                                did_panel_extend = False
 
-                                fiscal_payload = {
-                                    "event": "payment.succeeded",
-                                    "object": {
-                                        "id": payment_dict_for_processing.get("id"),
-                                        "status": payment_dict_for_processing.get("status"),
-                                        "amount": {
-                                            "value": payment_dict_for_processing.get("amount", {}).get("value", "0.0")
-                                        },
-                                        "description": payment_dict_for_processing.get("description"),
-                                        "receipt": {
-                                            "customer": {
-                                                # Ferma примет отсутствие этих полей; если есть — передадим
-                                                **({"email": buyer_email} if buyer_email else {}),
-                                                **({"phone": buyer_phone} if buyer_phone else {}),
+                                if source == "admin_link" and username_raw and (id_type in {"panel_username", "username"} or not id_type):
+                                    # --- продление в ПАНЕЛИ по нику ---
+                                    try:
+                                        username_norm = username_raw.lstrip("@").lower()
+                                        # 1) читаем текущего пользователя из панели (для текущего expireAt)
+                                        user_in_panel = None
+                                        try:
+                                            users = await panel_service.get_users_by_filter(username=username_norm, log_response=False)
+                                            if users and isinstance(users, list):
+                                                user_in_panel = users[0]
+                                        except Exception:
+                                            user_in_panel = None
+
+                                        now_utc = datetime.now(timezone.utc)
+                                        base_dt = now_utc
+                                        if user_in_panel:
+                                            exp_raw = user_in_panel.get("expireAt") or user_in_panel.get("expire_at")
+                                            if isinstance(exp_raw, str) and exp_raw:
+                                                try:
+                                                    base_dt = datetime.fromisoformat(exp_raw.replace("Z", "+00:00"))
+                                                    if base_dt.tzinfo is None:
+                                                        base_dt = base_dt.replace(tzinfo=timezone.utc)
+                                                except Exception:
+                                                    base_dt = now_utc
+
+                                        # выбираем стартовую дату
+                                        start_dt = base_dt if base_dt > now_utc else now_utc
+                                        # считаем новую дату через add_months
+                                        target_dt = add_months(start_dt, max(months, 0))
+                                        target_iso = target_dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+                                        did_panel_extend = await panel_service.set_expire_at_by_username(
+                                            username=username_norm,
+                                            new_expire_at_iso=target_iso,
+                                            log_response=True,
+                                        )
+
+                                        # уведомим лог-чат
+                                        try:
+                                            if getattr(settings, "LOG_CHAT_ID", None):
+                                                amount_val = (payment_dict_for_processing.get("amount") or {}).get("value")
+                                                amount_cur = (payment_dict_for_processing.get("amount") or {}).get("currency")
+                                                await bot.send_message(
+                                                    int(settings.LOG_CHAT_ID),
+                                                    (
+                                                        ("✅" if did_panel_extend else "❌") + " AdminLink: продление в ПАНЕЛИ\n"
+                                                        f"👤 @{username_norm}\n"
+                                                        f"🕒 +{months} мес. → {target_iso}\n"
+                                                        f"💳 {amount_val} {amount_cur}\n"
+                                                        f"🧾 YK: <code>{payment_dict_for_processing.get('id')}</code>"
+                                                    ),
+                                                    parse_mode="HTML",
+                                                    disable_web_page_preview=True,
+                                                )
+                                        except Exception:
+                                            pass
+
+                                    except Exception:
+                                        logging.exception("AdminLink(panel_username): panel extension failed")
+
+                                    # НЕ трогаем БД бота для admin_link по нику
+
+                                else:
+                                    # --- обычный пользовательский флоу через БД бота ---
+                                    await process_successful_payment(
+                                        session, bot, payment_dict_for_processing,
+                                        i18n_instance, settings, panel_service,
+                                        subscription_service, referral_service
+                                    )
+                                    await session.commit()
+
+                                # ------------------------- ФИСКАЛИЗАЦИЯ (общая для обеих веток) -------------------------
+                                try:
+                                    metadata = payment_dict_for_processing.get("metadata", {}) or {}
+                                    user_id_str = metadata.get("user_id")
+                                    buyer_email = settings.YOOKASSA_DEFAULT_RECEIPT_EMAIL
+                                    buyer_phone = None
+
+                                    fiscal_payload = {
+                                        "event": "payment.succeeded",
+                                        "object": {
+                                            "id": payment_dict_for_processing.get("id"),
+                                            "status": payment_dict_for_processing.get("status"),
+                                            "amount": {
+                                                "value": payment_dict_for_processing.get("amount", {}).get("value", "0.0")
+                                            },
+                                            "description": payment_dict_for_processing.get("description"),
+                                            "receipt": {
+                                                "customer": {
+                                                    **({"email": buyer_email} if buyer_email else {}),
+                                                    **({"phone": buyer_phone} if buyer_phone else {}),
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                fiscal_result = await fiscalize_on_yookassa_succeeded(async_session_factory, fiscal_payload)
-                                if not fiscal_result.get("ok"):
-                                    logging.error("Fiscalization failed for payment %s: %s",
-                                                  payment_dict_for_processing.get("id"), fiscal_result)
-                                else:
-                                    logging.info("Fiscalization queued/sent for payment %s: %s",
-                                                 payment_dict_for_processing.get("id"), fiscal_result)
-                            except Exception:
-                                # Не валим вебхук YooKassa — просто логируем
-                                logging.exception("Exception while starting fiscalization for YK payment %s",
-                                                  payment_dict_for_processing.get("id"))
-                            # ----------------------------------------------------------------------
+                                    fiscal_result = await fiscalize_on_yookassa_succeeded(async_session_factory, fiscal_payload)
+                                    if not fiscal_result.get("ok"):
+                                        logging.error("Fiscalization failed for payment %s: %s",
+                                                    payment_dict_for_processing.get("id"), fiscal_result)
+                                    else:
+                                        logging.info("Fiscalization queued/sent for payment %s: %s",
+                                                    payment_dict_for_processing.get("id"), fiscal_result)
+                                except Exception:
+                                    logging.exception("Exception while starting fiscalization for YK payment %s",
+                                                    payment_dict_for_processing.get("id"))
+                                # -----------------------------------------------------------------------------------------
 
-                        else:
-                            logging.warning(
-                                f"Payment Succeeded event for {payment_dict_for_processing.get('id')} "
-                                f"but data not as expected: status='{payment_dict_for_processing.get('status')}', "
-                                f"paid='{payment_dict_for_processing.get('paid')}'"
-                            )
+                            else:
+                                logging.warning(
+                                    f"Payment Succeeded event for {payment_dict_for_processing.get('id')} "
+                                    f"but data not as expected: status='{payment_dict_for_processing.get('status')}', "
+                                    f"paid='{payment_dict_for_processing.get('paid')}'"
+                                )
+
                     elif notification_object.event == YOOKASSA_EVENT_PAYMENT_CANCELED:
                         await process_cancelled_payment(
                             session, bot, payment_dict_for_processing,

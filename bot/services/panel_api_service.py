@@ -442,6 +442,43 @@ class PanelApiService:
         )
         return False
 
+    async def set_expire_at_by_username(
+        self,
+        username: str,
+        new_expire_at_iso: str,
+        *,
+        log_response: bool = True,
+    ) -> bool:
+        """
+        Находит пользователя в панели по username и выставляет ему expireAt = new_expire_at_iso.
+        Ничего не считает — дата уже должна быть вычислена извне.
+        """
+        try:
+            username_norm = username.lstrip("@").lower()
+            users = await self.get_users_by_filter(username=username_norm, log_response=False)
+            if users is None:
+                logging.error("Panel: set_expire_at_by_username failed: request error for @%s", username_norm)
+                return False
+            if not users:
+                logging.error("Panel: user not found by username @%s", username_norm)
+                return False
+            user = users[0]
+            user_uuid = user.get("uuid")
+            if not user_uuid:
+                logging.error("Panel: user @%s has no uuid", username_norm)
+                return False
+
+            resp = await self.update_user_details_on_panel(
+                user_uuid=user_uuid,
+                update_payload={"expireAt": new_expire_at_iso},
+                log_response=log_response,
+            )
+            return bool(resp)
+        except Exception:
+            logging.exception("Panel: set_expire_at_by_username exception for @%s", username)
+            return False
+
+
     async def get_subscription_link(
             self,
             short_uuid_or_sub_uuid: str,
