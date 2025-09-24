@@ -3,7 +3,7 @@ import logging
 import csv
 import io
 import json
-from aiogram import Router, F, types
+from aiogram import Router, F, types, Bot
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from datetime import datetime, timedelta, timezone
