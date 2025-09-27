@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
-import logging, os
+import os
 
 import aiohttp
 
@@ -48,7 +48,11 @@ class FermaConfig:
         """
         # Timezone: 0 -> None (не передавать), иначе 1..11
         tz_raw = getattr(s, "FERMA_TIMEZONE", 0) or 0
-        tz_num: Optional[int] = int(tz_raw) if int(tz_raw) != 0 else None
+        try:
+            tz_int = int(tz_raw)
+        except Exception:
+            tz_int = 0
+        tz_num: Optional[int] = tz_int if tz_int != 0 else None
 
         return cls(
             base_url=s.FERMA_BASE_URL or "https://ferma.ofd.ru",
@@ -75,11 +79,13 @@ class FermaConfig:
         На случай, если Settings недоступен (не должен случиться в твоём проекте),
         подстрахуемся простыми дефолтами.
         """
-        # Импорт здесь, чтобы не тянуть os для нормального пути с Settings
-        import os
-
         tz_raw = os.getenv("FERMA_TIMEZONE", "0")
-        tz_num: Optional[int] = int(tz_raw) if tz_raw and tz_raw != "0" else None
+        tz_num: Optional[int] = None
+        try:
+            tz_int = int(tz_raw) if tz_raw else 0
+            tz_num = tz_int if tz_int != 0 else None
+        except Exception:
+            tz_num = None
 
         base_url = os.getenv("FERMA_BASE_URL", "https://ferma.ofd.ru")
         webhook_base = os.getenv("WEBHOOK_BASE_URL") or None
@@ -112,7 +118,9 @@ class FermaError(RuntimeError):
         self.http_status = http_status
         self.payload = payload
 
+
 log = logging.getLogger("ferma.client")
+
 
 class FermaClient:
     """
@@ -149,21 +157,38 @@ class FermaClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def _auth(self) -> None:
+        """
+        Логин в Ferma и сохранение токена с временем истечения.
+        """
+        sess = await self._session_get()
+        url = self.cfg.base_url.rstrip("/") + "/api/Authorization/CreateAuthToken"
+        body = {"Login": self.cfg.login, "Password": self.cfg.password}
+
+        async with sess.post(url, json=body) as r:
+            data = await _safe_json(r)
+            if r.status != 200 or data.get("Status") != "Success":
+                log.error("Ferma auth failed: status=%s body=%s", r.status, data)
+                raise FermaError(r.status, data)
+
+            d = data.get("Data") or {}
+            self._token = d.get("AuthToken")
+            exp = d.get("ExpirationDateUtc")
+            self._token_expiry = _parse_ferma_utc(exp)
+            # Немного полезного лога (паролей тут нет)
+            log.info(
+                "Ferma auth OK. Token expires at %s (UTC). Base=%s Login=%s",
+                self._token_expiry, self.cfg.base_url, self.cfg.login
+            )
+
     async def _ensure_token(self):
         """
         Кешируем токен; обновляем заранее (за 60 сек до истечения).
         """
-        if self._token and self._token_expiry and (self._token_expiry - datetime.now(timezone.utc)).total_seconds() > 60:
-            return
-
-        body = {"Login": self.cfg.login, "Password": self.cfg.password}
-        data = await self._post_json("/api/Authorization/CreateAuthToken", body, use_token=False)
-        if data.get("Status") != "Success":
-            raise FermaError(200, data)
-        d = data.get("Data") or {}
-        self._token = d.get("AuthToken")
-        exp = d.get("ExpirationDateUtc")
-        self._token_expiry = _parse_ferma_utc(exp)
+        if self._token and self._token_expiry:
+            if (self._token_expiry - datetime.now(timezone.utc)).total_seconds() > 60:
+                return
+        await self._auth()
 
     # --------------------- public API ---------------------
 
@@ -181,31 +206,25 @@ class FermaClient:
         Все поля берутся из .env через Settings (self.cfg). Ничего не хардкодим.
         Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
-        import os
         s = get_settings()
 
         # --- Inn (обязателен) ---
         inn = str(getattr(s, "FERMA_INN", "")).strip()
 
         # --- Опциональные параметры из .env ---
-        # Тип налогообложения: Common|SimpleIn|SimpleInOut|Unified|UnifiedAgricultural|Patent
         taxation = (getattr(s, "FERMA_TAXATION_SYSTEM", None) or "").strip() or None
-        # НДС: Vat20|Vat10|Vat0|VatNo
         vat = getattr(s, "FERMA_VAT", "VatNo")
-        # Признак предмета расчёта и способ расчёта (обычно 4/4 для услуги/полный расчёт)
         payment_type = int(getattr(s, "FERMA_PAYMENT_TYPE", 4))
         payment_method = int(getattr(s, "FERMA_PAYMENT_METHOD", 4))
-        # Единица измерения (ФФД 1.2): PIECE и т.д.
         measure = getattr(s, "FERMA_MEASURE", "PIECE")
-        # Признак интернет-торговли
         is_internet = bool(getattr(s, "FERMA_IS_INTERNET", False))
-        # Адрес расчётов (при необходимости)
         bill_address = (getattr(s, "FERMA_BILL_ADDRESS", None) or "").strip() or None
-        # Часовой пояс кассы (1..11), 0/пусто — не передавать
         timezone = getattr(s, "FERMA_TIMEZONE", 0)
-        timezone = int(timezone) if isinstance(timezone, (int, str)) and str(timezone).isdigit() else 0
+        try:
+            timezone = int(timezone)
+        except Exception:
+            timezone = 0
         timezone = timezone if 1 <= timezone <= 11 else None
-
 
         # --- CallbackUrl (важно для колбэка Ferma) ---
         callback_url = getattr(s, "ferma_full_callback_url", None)
@@ -229,7 +248,6 @@ class FermaClient:
         customer_receipt = {
             "Items": [item],
             "TotalSum": total,
-            # Эти поля добавим только если есть значения
             **({"TaxationSystem": taxation} if taxation else {}),
             **({"BillAddress": bill_address} if bill_address else {}),
             **({"Email": buyer_email} if buyer_email else {}),
@@ -246,26 +264,29 @@ class FermaClient:
             **({"IsInternet": True} if is_internet else {}),
             **({"Timezone": timezone} if timezone is not None else {}),
             **({"Data": {"PaymentIdentifiers": [payment_identifiers]}}
-            if payment_identifiers else {}),
+               if payment_identifiers else {}),
         }
         payload = {"Request": request_obj}
 
+        # Отладочный лог полезен при интеграциях (без чувствительных данных)
+        try:
+            log.info(
+                "Ferma SEND receipt: inn=%s, group=%s, invoice=%s, amount=%.2f, callback=%r, payload_keys=%s",
+                inn, getattr(s, "FERMA_GROUP_CODE", None), invoice_id, total, callback_url, list(payload["Request"].keys())
+            )
+        except Exception:
+            pass
 
-        # Вызов Ferma Cloud (self._post_json должен уметь подставлять токен при use_token=True)
+        # Вызов Ferma Cloud
         resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
         data = (resp or {}).get("Data") or resp or {}
 
         receipt_id = data.get("ReceiptId")
         ferma_invoice_id = data.get("InvoiceId")
         if not receipt_id:
-            raise FermaError(400, {"Status":"Failed","Error":{"Message":f"Invalid response from Ferma: {resp}"}})
+            raise FermaError(400, {"Status": "Failed", "Error": {"Message": f"Invalid response from Ferma: {resp}"}})
 
         return {"receipt_id": receipt_id, "invoice_id": ferma_invoice_id}
-
-
-
-
-
 
     async def check_status(self, *, invoice_id: str | None = None, receipt_id: str | None = None) -> dict:
         """
@@ -273,7 +294,7 @@ class FermaClient:
         Можно передавать либо ReceiptId, либо InvoiceId (одно из них обязательно).
         """
         if not invoice_id and not receipt_id:
-            raise FermaError("check_status requires either invoice_id or receipt_id")
+            raise ValueError("check_status requires either invoice_id or receipt_id")
 
         payload = {
             **({"InvoiceId": invoice_id} if invoice_id else {}),
@@ -282,7 +303,6 @@ class FermaClient:
         resp = await self._post_json("/api/kkt/cloud/status", payload, use_token=True)
         data = (resp or {}).get("Data") or {}
         return data
-
 
     # --------------------- build payload helpers ---------------------
 
@@ -347,36 +367,85 @@ class FermaClient:
 
         return {"Request": req}
 
-    # --------------------- low level HTTP with retries ---------------------
+    # --------------------- low level HTTP with retries + re-auth ---------------------
 
     async def _post_json(self, path: str, json_body: Dict[str, Any], *, use_token: bool) -> Dict[str, Any]:
+        """
+        Базовый POST.
+        - Если use_token=True, гарантируем валидный токен (ленивый логин/рефреш).
+        - Отправляем токен как query param AuthToken=<...> (как в твоей рабочей версии).
+        - При 401 или ответе с Code=1001 делаем ОДИН повтор с принудительным ре-логином.
+        - На 429/5xx — экспоненциальный ретрай.
+        """
         sess = await self._session_get()
         url = self.cfg.base_url.rstrip("/") + path
+
         params: Dict[str, str] = {}
         if use_token:
-            if not self._token:
-                await self._ensure_token()
-            params["AuthToken"] = self._token  # type: ignore
+            await self._ensure_token()
+            if self._token:
+                params["AuthToken"] = self._token  # type: ignore
 
         headers = {"Content-Type": "application/json"}
 
         attempts = 5
         backoff = 0.6
+
+        async def _once(with_refresh: bool = False) -> tuple[int, Dict[str, Any]]:
+            # если запрос после принудительного ре-логина
+            if with_refresh:
+                # сброс токена и повторная аутентификация
+                self._token = None
+                self._token_expiry = None
+                try:
+                    await self._auth()
+                except Exception as e:
+                    # вернуть 401 с телом ошибки авторизации
+                    return 401, {"Status": "Failed", "Error": {"Message": f"Auth refresh failed: {e}"}}
+                # обновить параметр
+                if self._token:
+                    params["AuthToken"] = self._token  # type: ignore
+
+            async with sess.post(url, params=params, json=json_body, headers=headers) as r:
+                data = await _safe_json(r)
+                return r.status, data
+
         for i in range(1, attempts + 1):
-            try:
-                async with sess.post(url, params=params, json=json_body, headers=headers) as r:
-                    data = await _safe_json(r)
-                    if 200 <= r.status < 300:
-                        return data
-                    # retry на перегрузку/тайм-ауты/429
-                    if r.status in (429, 500, 502, 503, 504):
-                        raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status, message="server error")
-                    raise FermaError(r.status, data)
-            except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, aiohttp.ServerTimeoutError, aiohttp.ClientResponseError):
+            status, data = await _once(with_refresh=False)
+
+            # штатный успех
+            if 200 <= status < 300:
+                # но проверим «логическую» ошибку авторизации
+                if (isinstance(data, dict)
+                        and data.get("Status") == "Failed"
+                        and isinstance(data.get("Error"), dict)
+                        and str((data["Error"].get("Code"))) == "1001"):
+                    # «Клиент не авторизован» в теле — как 401
+                    status = 401
+                else:
+                    return data
+
+            # 401 — принудительный ре-логин и один повтор
+            if status == 401 and use_token:
+                status2, data2 = await _once(with_refresh=True)
+                if 200 <= status2 < 300:
+                    return data2
+                # если повтор тоже не удался — бросаем ошибку
+                raise FermaError(status2, data2)
+
+            # retry на перегрузку/тайм-ауты/429
+            if status in (429, 500, 502, 503, 504):
                 if i == attempts:
-                    raise
+                    raise FermaError(status, data)
                 await asyncio.sleep(backoff)
                 backoff *= 2
+                continue
+
+            # прочие ошибки — сразу исключение
+            raise FermaError(status, data)
+
+        # теоретически недостижимо
+        raise FermaError(599, {"Status": "Failed", "Error": {"Message": "Unexpected retry loop exit"}})
 
 
 # --------------------- helpers ---------------------
