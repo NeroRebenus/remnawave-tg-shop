@@ -200,34 +200,45 @@ class FermaClient:
         buyer_email: str | None = None,
         buyer_phone: str | None = None,
         payment_identifiers: str | None = None,
+        *,
+        overrides: dict | None = None,              # <— НОВОЕ: точечные переопределения
     ) -> dict:
         """
         Формирует чек прихода (Type='Income') для Ferma Cloud KKT.
-        Все поля берутся из .env через Settings (self.cfg). Ничего не хардкодим.
+        Все поля берутся из .env через Settings (self.cfg), но могут быть
+        переопределены через overrides для разового вызова.
         Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
         s = get_settings()
+        ov = overrides or {}
 
         # --- Inn (обязателен) ---
-        inn = str(getattr(s, "FERMA_INN", "")).strip()
+        inn = str(ov.get("inn", getattr(s, "FERMA_INN", ""))).strip()
 
-        # --- Опциональные параметры из .env ---
-        taxation = (getattr(s, "FERMA_TAXATION_SYSTEM", None) or "").strip() or None
-        vat = getattr(s, "FERMA_VAT", "VatNo")
-        payment_type = int(getattr(s, "FERMA_PAYMENT_TYPE", 4))
-        payment_method = int(getattr(s, "FERMA_PAYMENT_METHOD", 4))
-        measure = getattr(s, "FERMA_MEASURE", "PIECE")
-        is_internet = bool(getattr(s, "FERMA_IS_INTERNET", False))
-        bill_address = (getattr(s, "FERMA_BILL_ADDRESS", None) or "").strip() or None
-        timezone = getattr(s, "FERMA_TIMEZONE", 0)
+        # --- Опциональные параметры (с override) ---
+        taxation = (ov.get("taxation_system", getattr(s, "FERMA_TAXATION_SYSTEM", None)) or "")
+        taxation = taxation.strip() or None
+
+        vat = ov.get("vat", getattr(s, "FERMA_VAT", "VatNo"))
+
+        payment_type = int(ov.get("payment_type", getattr(s, "FERMA_PAYMENT_TYPE", 4)))
+        payment_method = int(ov.get("payment_method", getattr(s, "FERMA_PAYMENT_METHOD", 4)))
+        measure = ov.get("measure", getattr(s, "FERMA_MEASURE", "PIECE"))
+
+        is_internet = bool(ov.get("is_internet", getattr(s, "FERMA_IS_INTERNET", False)))
+
+        bill_address = (ov.get("bill_address", getattr(s, "FERMA_BILL_ADDRESS", None)) or "")
+        bill_address = bill_address.strip() or None
+
+        tz_val = ov.get("timezone", getattr(s, "FERMA_TIMEZONE", 0))
         try:
-            timezone = int(timezone)
+            tz_int = int(tz_val)
         except Exception:
-            timezone = 0
-        timezone = timezone if 1 <= timezone <= 11 else None
+            tz_int = 0
+        timezone = tz_int if 1 <= tz_int <= 11 else None
 
-        # --- CallbackUrl (важно для колбэка Ferma) ---
-        callback_url = getattr(s, "ferma_full_callback_url", None)
+        # --- CallbackUrl: можно переопределить отдельно ---
+        callback_url = ov.get("callback_url", getattr(s, "ferma_full_callback_url", None))
         if not callback_url and getattr(s, "WEBHOOK_BASE_URL", None):
             base = s.WEBHOOK_BASE_URL.rstrip("/")
             path = getattr(s, "ferma_callback_path", "/webhook/ferma")

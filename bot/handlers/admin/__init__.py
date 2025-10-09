@@ -11,6 +11,7 @@ from . import payments
 from . import ads
 from . import user_price
 from . import paylink
+from . import admin_make_receipt
 
 admin_router_aggregate = Router(name="admin_features_router")
 
@@ -25,5 +26,6 @@ admin_router_aggregate.include_router(logs_admin.router)
 admin_router_aggregate.include_router(payments.router)
 admin_router_aggregate.include_router(ads.router)
 admin_router_aggregate.include_router(paylink.router)
+admin_router_aggregate.include_router(admin_make_receipt.router)
 
 __all__ = ("admin_router_aggregate", )
