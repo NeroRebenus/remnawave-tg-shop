@@ -62,44 +62,39 @@ def _boolish(s: Optional[str]) -> bool:
 # -------------------- Хендлер команды --------------------
 
 @router.message(Command("make_receipt"))
-async def make_receipt_cmd(
-    msg: Message,
-    settings: Settings,                     # уже прокидывается вашим DI
-    async_session_factory: sessionmaker,    # уже прокидывается вашим DI
-):
+async def make_receipt_cmd(msg: Message, settings: Settings, async_session_factory: sessionmaker, ferma_client: FermaClient):
     """
-    /make_receipt amount=400 desc="Оплата X" invoice=inv-123 email=user@ex.com phone=+7999...
-                   vat=Vat20 tax=SimpleIn method=4 type=4 measure=PIECE
-                   internet=1 bill="https://shop..." tz=3 callback=https://...
-                   inn=7841465198 pid=3061...  # PaymentIdentifiers (необязательно)
-
-    Обязательные минимум: amount, desc.
-    Если invoice не указан — сгенерируем INV-<timestamp>.
-    Остальные поля подхватываются из .env/Settings, но могут быть переопределены.
+    /make_receipt amount=400 desc="Оплата X" [invoice=INV-1] [email=...] [phone=...] [pid=...]
+      [vat=Vat20|Vat10|Vat0|VatNo] [tax=SimpleIn|Common|...] [type=4] [method=4] [measure=PIECE]
+      [internet=1] [bill="https://..."] [tz=3] [callback=https://...] [inn=7841465198]
+      [cashless_sum=400] [cashless_info="..."]
+      [pi="2:50,7:350"]    ← PaymentItems: "PaymentType:Sum" через запятую, напр. аванс=2:50; оплата кредита=7:350
     """
-    # --- доступ только для админов ---
-    if not (msg.from_user and msg.from_user.id in settings.ADMIN_IDS):
+    # --- доступ админам ---
+    if msg.from_user and msg.from_user.id not in settings.ADMIN_IDS:
         return await msg.reply("⛔ Доступ только для администраторов.")
 
-    parts = (msg.text or "").split(maxsplit=1)
-    if len(parts) == 1:
+    args = msg.text.split(maxsplit=1)
+    if len(args) == 1:
         return await msg.reply(
             "Использование:\n"
-            "/make_receipt amount=400 desc=\"Оплата X\" [invoice=...] [email=...] [phone=...]\n"
-            "[vat=VatNo|Vat20|Vat10|Vat0] [tax=SimpleIn] [type=4] [method=4] [measure=PIECE]\n"
-            "[internet=1] [bill=https://...] [tz=3] [callback=https://...] [inn=7841465198] [pid=...]"
+            "/make_receipt amount=400 desc=\"Оплата X\" [invoice=INV-1] [email=...] [phone=...] [pid=...]\n"
+            "[vat=VatNo] [tax=SimpleIn] [type=4] [method=4] [measure=PIECE] [internet=1]\n"
+            "[bill=https://...] [tz=3] [callback=https://...] [inn=7841465198]\n"
+            "[cashless_sum=400] [cashless_info=\"Полная оплата безналичными\"]\n"
+            "[pi=\"2:50,7:350\"]  # PaymentItems (тег 1215): 'PaymentType:Sum' через запятую"
         )
 
-    kv = _parse_kv(parts[1])
+    kv = _parse_kv(args[1])
 
-    # --- обязательные ---
+    # обязательные поля
     amount_str = kv.get("amount")
     desc = kv.get("desc") or kv.get("description")
     if not amount_str or not desc:
         return await msg.reply("Нужно указать минимум: amount=... и desc=\"...\"")
 
     try:
-        amount = float(str(amount_str).replace(",", "."))
+        amount = float(amount_str.replace(",", "."))
         if amount <= 0:
             raise ValueError
     except Exception:
@@ -108,10 +103,10 @@ async def make_receipt_cmd(
     invoice = kv.get("invoice") or f"INV-{int(datetime.now(timezone.utc).timestamp())}"
     email = kv.get("email")
     phone = kv.get("phone")
-    pid = kv.get("pid")  # PaymentIdentifiers (опц.)
+    pid = kv.get("pid")  # PaymentIdentifiers (опционально)
 
-    # --- overrides (всё опционально) ---
-    overrides: Dict[str, Any] = {}
+    # overrides (все необязательны)
+    overrides: dict = {}
     if "vat" in kv: overrides["vat"] = kv["vat"]
     if "tax" in kv or "taxation" in kv or "taxation_system" in kv:
         overrides["taxation_system"] = kv.get("tax") or kv.get("taxation") or kv.get("taxation_system")
@@ -123,12 +118,40 @@ async def make_receipt_cmd(
     if "tz" in kv: overrides["timezone"] = int(kv["tz"])
     if "callback" in kv: overrides["callback_url"] = kv["callback"]
     if "inn" in kv: overrides["inn"] = kv["inn"]
-    if "group" in kv: overrides["group_code"] = int(kv["group"])  # если у вас добавлена поддержка Group в клиенте
+    if "cashless_sum" in kv:
+        try:
+            overrides["cashless_sum"] = float(kv["cashless_sum"].replace(",", "."))
+        except Exception:
+            pass
+    if "cashless_info" in kv:
+        overrides["cashless_info"] = kv["cashless_info"]
 
-    # --- отправляем чек через ленивый FermaClient ---
-    client = get_ferma_client()
+    # PaymentItems (парсер строки вида: "2:50,7:350")
+    # где 2 — предварительная оплата (аванс), 7 — оплата кредита, и т.д.
+    # см. доку Ferma: тег 1215 (PaymentItems.PaymentType)
+    pi_raw = kv.get("pi") or kv.get("paymentitems") or kv.get("payment_items")
+    if pi_raw:
+        pi_list: list[dict] = []
+        for part in pi_raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if ":" not in part:
+                continue
+            t_str, s_str = part.split(":", 1)
+            try:
+                pt = int(t_str.strip())
+                ssum = float(s_str.strip().replace(",", "."))
+                if ssum > 0:
+                    pi_list.append({"PaymentType": pt, "Sum": round(ssum, 2)})
+            except Exception:
+                continue
+        if pi_list:
+            overrides["payment_items"] = pi_list
+
+    # отправляем чек
     try:
-        send_res = await client.send_income_receipt(
+        send_res = await ferma_client.send_income_receipt(
             invoice_id=invoice,
             amount=amount,
             description=desc,
@@ -144,14 +167,14 @@ async def make_receipt_cmd(
         log.exception("Admin make_receipt: unexpected error")
         return await msg.reply(f"❌ Не удалось отправить чек: {e}")
 
-    # --- на всякий случай, сохраним локальную запись, если её нет ---
+    # (опционально) сохранить у себя черновую запись о чеке
     try:
         async with async_session_factory() as session:
             repo = ReceiptsRepo(session)
             pr = await repo.get_by_invoice_id(invoice)
             if not pr:
                 await repo.create_new(
-                    payment_id=invoice,           # для админ-команды payment_id может не существовать — используем invoice
+                    payment_id=invoice,
                     invoice_id=invoice,
                     amount=amount,
                     description=desc,
@@ -159,15 +182,14 @@ async def make_receipt_cmd(
                     phone=phone,
                 )
     except Exception:
-        log.exception("Admin make_receipt: failed to write local receipt record (ignored)")
+        log.exception("Admin make_receipt: failed to write local receipt record")
 
     receipt_id = send_res.get("receipt_id")
     inv_back = send_res.get("invoice_id") or invoice
-
     return await msg.reply(
         "✅ Чек поставлен в очередь в Ферме.\n"
         f"• InvoiceId: <code>{inv_back}</code>\n"
         f"• ReceiptId: <code>{receipt_id}</code>\n\n"
-        "Статус и ссылку ОФД пришлёт вебхук Ferma. Если колбэк не придёт — сработает фолбэк-опрос.",
+        "Статус и ссылка ОФД придут колбэком Ferma; если колбэк не придёт — сработает фолбэк-опрос.",
         parse_mode="HTML",
     )

@@ -201,32 +201,43 @@ class FermaClient:
         buyer_phone: str | None = None,
         payment_identifiers: str | None = None,
         *,
-        overrides: dict | None = None,              # <— НОВОЕ: точечные переопределения
+        overrides: dict | None = None,              # ← точечные переопределения
     ) -> dict:
         """
         Формирует чек прихода (Type='Income') для Ferma Cloud KKT.
-        Все поля берутся из .env через Settings (self.cfg), но могут быть
-        переопределены через overrides для разового вызова.
-        Возвращает: {"receipt_id": str, "invoice_id": str | None}
+        Все поля берутся из Settings (self.cfg) и могут быть переопределены через overrides.
+
+        ДОБАВЛЕНО:
+        - поддержка CustomerReceipt.PaymentItems (тег 1215):
+                [{"PaymentType": 2, "Sum": 50}, ...]
+            где PaymentType:
+            1 — полная предварительная оплата (100%)
+            2 — предварительная оплата (аванс)
+            3 — частичная предварительная оплата
+            4 — полный расчёт
+            5 — частичный расчёт и кредит
+            6 — передача в кредит
+            7 — оплата кредита
+        - поддержка CustomerReceipt.CashlessPayments (для корректного платежного блока)
         """
         s = get_settings()
         ov = overrides or {}
 
         # --- Inn (обязателен) ---
         inn = str(ov.get("inn", getattr(s, "FERMA_INN", ""))).strip()
+        if not inn:
+            raise FermaError(400, {"Status": "Failed", "Error": {"Message": "FERMA_INN is required"}})
 
         # --- Опциональные параметры (с override) ---
         taxation = (ov.get("taxation_system", getattr(s, "FERMA_TAXATION_SYSTEM", None)) or "")
         taxation = taxation.strip() or None
 
         vat = ov.get("vat", getattr(s, "FERMA_VAT", "VatNo"))
-
-        payment_type = int(ov.get("payment_type", getattr(s, "FERMA_PAYMENT_TYPE", 4)))
-        payment_method = int(ov.get("payment_method", getattr(s, "FERMA_PAYMENT_METHOD", 4)))
+        payment_type_item = int(ov.get("payment_type", getattr(s, "FERMA_PAYMENT_TYPE", 4)))        # предмет расчёта на позиции
+        payment_method_item = int(ov.get("payment_method", getattr(s, "FERMA_PAYMENT_METHOD", 4)))  # способ расчёта на позиции
         measure = ov.get("measure", getattr(s, "FERMA_MEASURE", "PIECE"))
 
         is_internet = bool(ov.get("is_internet", getattr(s, "FERMA_IS_INTERNET", False)))
-
         bill_address = (ov.get("bill_address", getattr(s, "FERMA_BILL_ADDRESS", None)) or "")
         bill_address = bill_address.strip() or None
 
@@ -237,33 +248,87 @@ class FermaClient:
             tz_int = 0
         timezone = tz_int if 1 <= tz_int <= 11 else None
 
-        # --- CallbackUrl: можно переопределить отдельно ---
+        # --- CallbackUrl ---
         callback_url = ov.get("callback_url", getattr(s, "ferma_full_callback_url", None))
         if not callback_url and getattr(s, "WEBHOOK_BASE_URL", None):
             base = s.WEBHOOK_BASE_URL.rstrip("/")
             path = getattr(s, "ferma_callback_path", "/webhook/ferma")
             callback_url = f"{base}{path}"
 
-        # --- CustomerReceipt (одной строкой на всю сумму) ---
-        total = float(amount)
+        # --- Платёжный блок (CashlessPayments) ---
+        # Можно переопределить либо целиком (list[dict]), либо суммой `cashless_sum`
+        cashless_block = None
+        if "cashless" in ov and isinstance(ov["cashless"], list) and ov["cashless"]:
+            cashless_block = ov["cashless"]
+        else:
+            cashless_sum = ov.get("cashless_sum")
+            if cashless_sum is None:
+                # по умолчанию вся сумма безналом
+                cashless_sum = amount
+            try:
+                cashless_sum = float(str(cashless_sum).replace(",", "."))
+            except Exception:
+                cashless_sum = amount
+
+            add_info = ov.get("cashless_info", "Полная оплата безналичными")
+            # В ферме PaymentMethodFlag: "1" — безнал
+            cashless_block = [{
+                "PaymentSum": round(float(cashless_sum), 2),
+                "PaymentMethodFlag": "1",
+                "PaymentIdentifiers": payment_identifiers or invoice_id,
+                "AdditionalInformation": add_info,
+            }]
+
+        # --- Позиции (Items) ---
+        total = round(float(amount), 2)
         item = {
             "Label": (description or f"Оплата заказа {invoice_id}")[:128],
             "Price": total,
-            "Quantity": 1,
+            "Quantity": 1.0,
             "Amount": total,
             "Vat": vat,
             "Measure": measure,
-            "PaymentMethod": payment_method,
-            "PaymentType": payment_type,
+            "PaymentMethod": payment_method_item,
+            "PaymentType": payment_type_item,
         }
-        customer_receipt = {
-            "Items": [item],
-            "TotalSum": total,
-            **({"TaxationSystem": taxation} if taxation else {}),
-            **({"BillAddress": bill_address} if bill_address else {}),
-            **({"Email": buyer_email} if buyer_email else {}),
-            **({"Phone": buyer_phone} if buyer_phone else {}),
+        items = [item]
+
+        # --- PaymentItems (тег 1215): перечень оплат по видам (для аванса/зачёта и т.п.)
+        # Подаётся через overrides["payment_items"] = [{"PaymentType": 2, "Sum": 50}, ...]
+        payment_items = None
+        if "payment_items" in ov:
+            # Нормализуем: Sum -> float
+            raw = ov["payment_items"]
+            if isinstance(raw, list) and raw:
+                norm: list[dict] = []
+                for e in raw:
+                    try:
+                        t = int(e.get("PaymentType"))
+                        ssum = float(str(e.get("Sum")).replace(",", "."))
+                        norm.append({"PaymentType": t, "Sum": round(ssum, 2)})
+                    except Exception:
+                        continue
+                if norm:
+                    payment_items = norm
+
+        # --- CustomerReceipt ---
+        customer_receipt: dict = {
+            "Items": items,
+            "TotalSum": total,                  # не обязательное поле в их примере, но не мешает
+            "CashlessPayments": cashless_block, # важный блок
         }
+        if taxation:
+            customer_receipt["TaxationSystem"] = taxation
+        if bill_address:
+            customer_receipt["BillAddress"] = bill_address
+        if buyer_email:
+            customer_receipt["Email"] = buyer_email
+        if buyer_phone:
+            customer_receipt["Phone"] = buyer_phone
+        if payment_items:
+            customer_receipt["PaymentItems"] = payment_items
+        if timezone is not None:
+            customer_receipt["Timezone"] = timezone
 
         # --- Корневой Request ---
         request_obj: dict = {
@@ -271,24 +336,18 @@ class FermaClient:
             "Type": "Income",
             "InvoiceId": invoice_id,
             "CustomerReceipt": customer_receipt,
-            **({"CallbackUrl": callback_url} if callback_url else {}),
-            **({"IsInternet": True} if is_internet else {}),
-            **({"Timezone": timezone} if timezone is not None else {}),
-            **({"Data": {"PaymentIdentifiers": [payment_identifiers]}}
-               if payment_identifiers else {}),
         }
+        if callback_url:
+            request_obj["CallbackUrl"] = callback_url
+        if is_internet:
+            request_obj["IsInternet"] = True
+        # дублируем идентификатор платежа и в Data (удобно для трейсинга)
+        if payment_identifiers:
+            request_obj["Data"] = {"PaymentIdentifiers": [payment_identifiers]}
+
         payload = {"Request": request_obj}
 
-        # Отладочный лог полезен при интеграциях (без чувствительных данных)
-        try:
-            log.info(
-                "Ferma SEND receipt: inn=%s, group=%s, invoice=%s, amount=%.2f, callback=%r, payload_keys=%s",
-                inn, getattr(s, "FERMA_GROUP_CODE", None), invoice_id, total, callback_url, list(payload["Request"].keys())
-            )
-        except Exception:
-            pass
-
-        # Вызов Ferma Cloud
+        # Вызов Ferma
         resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
         data = (resp or {}).get("Data") or resp or {}
 
