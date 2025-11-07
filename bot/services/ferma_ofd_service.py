@@ -223,6 +223,7 @@ class FermaClient:
         """
         s = get_settings()
         ov = overrides or {}
+        req_type = (ov.get("force_type") or "Income").strip()
 
         # --- Inn (обязателен) ---
         inn = str(ov.get("inn", getattr(s, "FERMA_INN", ""))).strip()
@@ -329,7 +330,12 @@ class FermaClient:
             customer_receipt["PaymentItems"] = payment_items
         if timezone is not None:
             customer_receipt["Timezone"] = timezone
-
+            
+        corr_info = ov.get("correction_info")
+        if isinstance(corr_info, dict) and corr_info:
+            # ожидается структура вида:
+            # {"Type": "SELF"|"INSTRUCTION", "Description": "...", "ReceiptDate": "DD.MM.YY", "ReceiptId": "...."}
+            customer_receipt["CorrectionInfo"] = corr_info
         # --- Корневой Request ---
         request_obj: dict = {
             "Inn": inn,
