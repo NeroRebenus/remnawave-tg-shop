@@ -57,37 +57,38 @@ def _boolish(s: Optional[str]) -> bool:
 @router.message(Command("make_correction"))
 async def make_correction_cmd(msg: Message, settings: Settings):
     """
-    Оформляет чек КОРРЕКЦИИ (IncomeCorrection) по Ferma Cloud KKT.
-    Поддерживает PaymentItems (тег 1215) через pi="2:100,7:50".
+    Чек КОРРЕКЦИИ (Type=IncomeCorrection) + поддержка PaymentItems (тег 1215) через pi="2:100,7:50".
 
     Пример:
     /make_correction amount=100 desc="Отмена зачета аванса" \
       invoice=INV-CORR-001 corr_type=SELF corr_desc="Ошибочный чек" \
-      corr_receipt_date=17.01.21 corr_receipt_id=3144062149 \
-      pi="2:100" vat=VatNo tax=SimpleIn
+      corr_receipt_date=17.01.21 pi="2:100" vat=VatNo tax=SimpleIn
 
-    Параметры:
+    Важно:
+      - corr_receipt_id теперь *необязателен* (если указан — будет включён в CorrectionInfo).
+
+    Параметры (основные):
       amount=...          — сумма чека (обяз.)
       desc="..."          — наименование позиции (обяз.)
-      invoice=...         — твой идентификатор операции (если не задан — генерируем)
-      email=... phone=... — контакты покупателя (необяз.)
+      invoice=...         — идентификатор операции (если не задан — генерируем)
+      email=... phone=... — контакты покупателя (опционально)
       vat=Vat20|Vat10|Vat0|VatNo
       tax=SimpleIn|Common|SimpleInOut|Unified|UnifiedAgricultural|Patent
-      type=...            — PaymentType на ПОЗИЦИИ (по умолчанию 4 — полный расчёт)
-      method=...          — PaymentMethod на ПОЗИЦИИ (по умолчанию 4 — полный расчёт)
-      measure=PIECE|...   — единица измерения (ФФД 1.2)
+      type=...            — PaymentType на позиции (по умолчанию 4)
+      method=...          — PaymentMethod на позиции (по умолчанию 4)
+      measure=PIECE|...   — единица измерения
       internet=1|0        — признак интернет-торговли
       bill="https://..."  — адрес расчётов
       tz=3                — часовой пояс ККТ (1..11), 0/нет — не отправлять
-      inn=...             — переопределить ИНН (иначе из .env)
+      inn=...             — переопределить ИНН
       pid=...             — PaymentIdentifiers (опционально)
 
-      corr_type=SELF|INSTRUCTION           — тип коррекции (обяз. для коррекции)
-      corr_desc="..."                      — описание причины (обяз.)
-      corr_receipt_date=DD.MM.YY           — дата ошибочного чека (обяз., формат как в доке)
-      corr_receipt_id=NNNNNNNN             — номер ошибочного чека (обяз.)
+      corr_type=SELF|INSTRUCTION           — тип коррекции (обяз.)
+      corr_desc="..."                      — причина (обяз.)
+      corr_receipt_date=DD.MM.YY           — дата ошибочного чека (обяз.)
+      corr_receipt_id=NNNNNNNN             — номер ошибочного чека (НЕобязателен)
 
-      pi="2:100,7:50"                      — PaymentItems (тег 1215), формат "Тип:Сумма" через запятую:
+      pi="2:100,7:50"                      — PaymentItems (тег 1215): "Тип:Сумма"
                                              1 — полная предоплата (100%)
                                              2 — предоплата (аванс)
                                              3 — частичная предоплата
@@ -106,7 +107,7 @@ async def make_correction_cmd(msg: Message, settings: Settings):
             "Использование:\n"
             "/make_correction amount=100 desc=\"Отмена зачёта аванса\" "
             "invoice=INV-CORR-001 corr_type=SELF corr_desc=\"Ошибочный чек\" "
-            "corr_receipt_date=17.01.21 corr_receipt_id=3144062149 "
+            "corr_receipt_date=17.01.21 [corr_receipt_id=3144062149] "
             "pi=\"2:100\" [vat=VatNo] [tax=SimpleIn] [type=4] [method=4] [measure=PIECE] "
             "[internet=1] [bill=https://...] [tz=3] [inn=...] [pid=...]"
         )
@@ -131,11 +132,11 @@ async def make_correction_cmd(msg: Message, settings: Settings):
     phone = kv.get("phone")
     pid = kv.get("pid")
 
-    # -------- CorrectionInfo (обязательные для коррекции) --------
+    # -------- CorrectionInfo (corr_receipt_id — теперь опционален) --------
     corr_type = (kv.get("corr_type") or "").strip().upper()
     corr_desc = kv.get("corr_desc") or kv.get("correction_desc")
     corr_receipt_date = kv.get("corr_receipt_date") or kv.get("correction_receipt_date")
-    corr_receipt_id = kv.get("corr_receipt_id") or kv.get("correction_receipt_id")
+    corr_receipt_id = kv.get("corr_receipt_id") or kv.get("correction_receipt_id")  # ← опционально
 
     if corr_type not in {"SELF", "INSTRUCTION"}:
         return await msg.reply("corr_type обязателен и должен быть SELF или INSTRUCTION.")
@@ -143,22 +144,19 @@ async def make_correction_cmd(msg: Message, settings: Settings):
         return await msg.reply("corr_desc обязателен (описание причины коррекции).")
     if not corr_receipt_date:
         return await msg.reply("corr_receipt_date обязателен (например, 17.01.21).")
-    if not corr_receipt_id:
-        return await msg.reply("corr_receipt_id обязателен (номер ошибочного чека).")
 
-    # не жёстко валидируем дату, просто слегка нормализуем
     corr_info = {
         "Type": corr_type,
         "Description": corr_desc,
         "ReceiptDate": corr_receipt_date,  # формат Ferma "DD.MM.YY"
-        "ReceiptId": corr_receipt_id,
     }
+    if corr_receipt_id:  # включаем только если задан
+        corr_info["ReceiptId"] = corr_receipt_id
 
     # -------- overrides --------
     overrides: dict[str, Any] = {}
-
-    # ключевое: это именно чек КОРРЕКЦИИ
-    overrides["force_type"] = "IncomeCorrection"
+    overrides["force_type"] = "IncomeCorrection"  # ключевое: чек коррекции
+    overrides["correction_info"] = corr_info
 
     # базовые поля (необязательные, берутся из .env при отсутствии)
     if "vat" in kv: overrides["vat"] = kv["vat"]
@@ -173,10 +171,7 @@ async def make_correction_cmd(msg: Message, settings: Settings):
     if "callback" in kv: overrides["callback_url"] = kv["callback"]
     if "inn" in kv: overrides["inn"] = kv["inn"]
 
-    # CorrectionInfo (важно!)
-    overrides["correction_info"] = corr_info
-
-    # PaymentItems: строка вида "2:100,7:350"
+    # PaymentItems: строка вида "2:100,7:350" (например, отмена зачёта предоплаты: pi="2:100")
     pi_raw = kv.get("pi") or kv.get("paymentitems") or kv.get("payment_items")
     if pi_raw:
         pi_list: list[dict] = []
