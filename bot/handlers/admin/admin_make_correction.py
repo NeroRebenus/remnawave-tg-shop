@@ -10,7 +10,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from config.settings import Settings
+from config.settings import Settings, get_settings
 from bot.services.ferma_ofd_service import FermaClient, FermaError
 
 log = logging.getLogger(__name__)
@@ -65,23 +65,25 @@ async def make_correction_cmd(msg: Message, settings: Settings):
       corr_receipt_date=17.01.21 pi="2:100" vat=VatNo tax=SimpleIn
 
     Важно:
-      - corr_receipt_id теперь *необязателен* (если указан — будет включён в CorrectionInfo).
+      - corr_receipt_id *опционален* (если указан — включим в CorrectionInfo).
 
     Параметры (основные):
       amount=...          — сумма чека (обяз.)
       desc="..."          — наименование позиции (обяз.)
       invoice=...         — идентификатор операции (если не задан — генерируем)
       email=... phone=... — контакты покупателя (опционально)
+      pid=...             — PaymentIdentifiers (опционально)
+
       vat=Vat20|Vat10|Vat0|VatNo
       tax=SimpleIn|Common|SimpleInOut|Unified|UnifiedAgricultural|Patent
       type=...            — PaymentType на позиции (по умолчанию 4)
       method=...          — PaymentMethod на позиции (по умолчанию 4)
-      measure=PIECE|...   — единица измерения
+      measure=PIECE|...   — единица измерения (по умолчанию PIECE)
       internet=1|0        — признак интернет-торговли
       bill="https://..."  — адрес расчётов
       tz=3                — часовой пояс ККТ (1..11), 0/нет — не отправлять
       inn=...             — переопределить ИНН
-      pid=...             — PaymentIdentifiers (опционально)
+      callback=https://.. — переопределить CallbackUrl
 
       corr_type=SELF|INSTRUCTION           — тип коррекции (обяз.)
       corr_desc="..."                      — причина (обяз.)
@@ -109,7 +111,7 @@ async def make_correction_cmd(msg: Message, settings: Settings):
             "invoice=INV-CORR-001 corr_type=SELF corr_desc=\"Ошибочный чек\" "
             "corr_receipt_date=17.01.21 [corr_receipt_id=3144062149] "
             "pi=\"2:100\" [vat=VatNo] [tax=SimpleIn] [type=4] [method=4] [measure=PIECE] "
-            "[internet=1] [bill=https://...] [tz=3] [inn=...] [pid=...]"
+            "[internet=1] [bill=https://...] [tz=3] [inn=...] [pid=...] [callback=https://...]"
         )
 
     kv = _parse_kv(args[1])
@@ -132,7 +134,7 @@ async def make_correction_cmd(msg: Message, settings: Settings):
     phone = kv.get("phone")
     pid = kv.get("pid")
 
-    # -------- CorrectionInfo (corr_receipt_id — теперь опционален) --------
+    # -------- CorrectionInfo (corr_receipt_id — опционален) --------
     corr_type = (kv.get("corr_type") or "").strip().upper()
     corr_desc = kv.get("corr_desc") or kv.get("correction_desc")
     corr_receipt_date = kv.get("corr_receipt_date") or kv.get("correction_receipt_date")
@@ -145,36 +147,78 @@ async def make_correction_cmd(msg: Message, settings: Settings):
     if not corr_receipt_date:
         return await msg.reply("corr_receipt_date обязателен (например, 17.01.21).")
 
-    corr_info = {
+    correction_info = {
         "Type": corr_type,
         "Description": corr_desc,
         "ReceiptDate": corr_receipt_date,  # формат Ferma "DD.MM.YY"
     }
-    if corr_receipt_id:  # включаем только если задан
-        corr_info["ReceiptId"] = corr_receipt_id
+    if corr_receipt_id:
+        correction_info["ReceiptId"] = corr_receipt_id
 
-    # -------- overrides --------
-    overrides: dict[str, Any] = {}
-    overrides["force_type"] = "IncomeCorrection"  # ключевое: чек коррекции
-    overrides["correction_info"] = corr_info
+    # -------- дефолты из Settings, c возможностью override --------
+    s = get_settings()
 
-    # базовые поля (необязательные, берутся из .env при отсутствии)
-    if "vat" in kv: overrides["vat"] = kv["vat"]
-    if "tax" in kv or "taxation" in kv or "taxation_system" in kv:
-        overrides["taxation_system"] = kv.get("tax") or kv.get("taxation") or kv.get("taxation_system")
-    if "type" in kv: overrides["payment_type"] = int(kv["type"])
-    if "method" in kv: overrides["payment_method"] = int(kv["method"])
-    if "measure" in kv: overrides["measure"] = kv["measure"]
-    if "internet" in kv: overrides["is_internet"] = _boolish(kv["internet"])
-    if "bill" in kv: overrides["bill_address"] = kv["bill"]
-    if "tz" in kv: overrides["timezone"] = int(kv["tz"])
-    if "callback" in kv: overrides["callback_url"] = kv["callback"]
-    if "inn" in kv: overrides["inn"] = kv["inn"]
+    inn = (kv.get("inn") or getattr(s, "FERMA_INN", "") or "").strip()
+    if not inn:
+        return await msg.reply("FERMA_INN не задан (ни в команде, ни в настройках).")
 
-    # PaymentItems: строка вида "2:100,7:350" (например, отмена зачёта предоплаты: pi="2:100")
+    taxation = (kv.get("tax") or kv.get("taxation") or kv.get("taxation_system")
+                or getattr(s, "FERMA_TAXATION_SYSTEM", "") or "").strip() or None
+    vat = kv.get("vat") or getattr(s, "FERMA_VAT", "VatNo")
+    measure = kv.get("measure") or getattr(s, "FERMA_MEASURE", "PIECE")
+
+    try:
+        payment_type_item = int(kv.get("type") or getattr(s, "FERMA_PAYMENT_TYPE", 4))
+    except Exception:
+        payment_type_item = 4
+    try:
+        payment_method_item = int(kv.get("method") or getattr(s, "FERMA_PAYMENT_METHOD", 4))
+    except Exception:
+        payment_method_item = 4
+
+    is_internet = _boolish(kv.get("internet")) if "internet" in kv else bool(getattr(s, "FERMA_IS_INTERNET", False))
+
+    bill_address = (kv.get("bill") or getattr(s, "FERMA_BILL_ADDRESS", None) or "").strip() or None
+
+    tz_val = kv.get("tz", getattr(s, "FERMA_TIMEZONE", 0))
+    try:
+        tz_int = int(tz_val) if tz_val is not None else 0
+    except Exception:
+        tz_int = 0
+    timezone_num = tz_int if 1 <= tz_int <= 11 else None
+
+    callback_url = kv.get("callback") or getattr(s, "ferma_full_callback_url", None)
+    if not callback_url and getattr(s, "WEBHOOK_BASE_URL", None):
+        base = s.WEBHOOK_BASE_URL.rstrip("/")
+        path = getattr(s, "ferma_callback_path", "/webhook/ferma")
+        callback_url = f"{base}{path}"
+
+    # -------- CashlessPayments (по умолчанию вся сумма безналом) --------
+    cashless_block = [{
+        "PaymentSum": round(float(amount), 2),
+        "PaymentMethodFlag": "1",                      # безнал
+        "PaymentIdentifiers": pid or invoice,          # удобно для трассировки
+        "AdditionalInformation": "Полная оплата безналичными",
+    }]
+
+    # -------- Позиции --------
+    item = {
+        "Label": (desc or f"Отмена/коррекция {invoice}")[:128],
+        "Price": round(float(amount), 2),
+        "Quantity": 1.0,
+        "Amount": round(float(amount), 2),
+        "Vat": vat,
+        "Measure": measure,
+        "PaymentMethod": payment_method_item,
+        "PaymentType": payment_type_item,
+    }
+    items = [item]
+
+    # -------- PaymentItems (тег 1215) из pi="2:100,7:50" --------
+    payment_items = None
     pi_raw = kv.get("pi") or kv.get("paymentitems") or kv.get("payment_items")
     if pi_raw:
-        pi_list: list[dict] = []
+        tmp: list[dict] = []
         for part in pi_raw.split(","):
             part = part.strip()
             if not part or ":" not in part:
@@ -184,33 +228,69 @@ async def make_correction_cmd(msg: Message, settings: Settings):
                 pt = int(t_str.strip())
                 ssum = float(s_str.strip().replace(",", "."))
                 if ssum > 0:
-                    pi_list.append({"PaymentType": pt, "Sum": round(ssum, 2)})
+                    tmp.append({"PaymentType": pt, "Sum": round(ssum, 2)})
             except Exception:
                 continue
-        if pi_list:
-            overrides["payment_items"] = pi_list
+        if tmp:
+            payment_items = tmp
 
-    # -------- отправка --------
+    # -------- CustomerReceipt --------
+    customer_receipt: dict[str, Any] = {
+        "Items": items,
+        "CashlessPayments": cashless_block,
+        "PaymentType": payment_type_item,  # поле чека (как в примере Ferma)
+        "CorrectionInfo": correction_info,
+    }
+    if taxation:
+        customer_receipt["TaxationSystem"] = taxation
+    if bill_address:
+        customer_receipt["BillAddress"] = bill_address
+    if email:
+        customer_receipt["Email"] = email
+    if phone:
+        customer_receipt["Phone"] = phone
+    if payment_items:
+        customer_receipt["PaymentItems"] = payment_items
+    if timezone_num is not None:
+        customer_receipt["Timezone"] = timezone_num
+
+    # -------- Корневой Request --------
+    request_obj: dict[str, Any] = {
+        "Inn": inn,
+        "Type": "IncomeCorrection",
+        "InvoiceId": invoice,
+        "CustomerReceipt": customer_receipt,
+    }
+    if callback_url:
+        request_obj["CallbackUrl"] = callback_url
+    if is_internet:
+        request_obj["IsInternet"] = True
+    if pid:
+        request_obj["Data"] = {"PaymentIdentifiers": [pid]}
+
+    payload = {"Request": request_obj}
+
+    # -------- Отправка через низкоуровневый FermaClient._post_json --------
     ferma = get_ferma_client()
     try:
-        send_res = await ferma.send_income_receipt(
-            invoice_id=invoice,
-            amount=amount,
-            description=desc,
-            buyer_email=email,
-            buyer_phone=phone,
-            payment_identifiers=pid,
-            overrides=overrides,
-        )
+        # у клиента должен быть _post_json(path, json_body, use_token=True)
+        resp = await ferma._post_json("/api/kkt/cloud/receipt", payload, use_token=True)  # type: ignore[attr-defined]
     except FermaError as e:
         log.exception("Admin make_correction: Ferma error")
-        return await msg.reply(f"❌ Ошибка Ferma: {e}")
+        return await msg.reply(f"❌ Ошибка Ferма: {e}")
+    except AttributeError as e:
+        log.exception("Admin make_correction: FermaClient lacks _post_json")
+        return await msg.reply("❌ В текущем FermaClient нет метода _post_json. Обнови bot.services.ferma_ofd_service.")
     except Exception as e:
         log.exception("Admin make_correction: unexpected error")
         return await msg.reply(f"❌ Не удалось отправить чек коррекции: {e}")
 
-    receipt_id = send_res.get("receipt_id")
-    inv_back = send_res.get("invoice_id") or invoice
+    data = (resp or {}).get("Data") or resp or {}
+    receipt_id = data.get("ReceiptId")
+    inv_back = data.get("InvoiceId") or invoice
+    if not receipt_id:
+        return await msg.reply(f"❌ Ferma не вернула ReceiptId. Ответ: {resp}")
+
     return await msg.reply(
         "✅ Чек КОРРЕКЦИИ поставлен в очередь в Ферме.\n"
         f"• InvoiceId: <code>{inv_back}</code>\n"
