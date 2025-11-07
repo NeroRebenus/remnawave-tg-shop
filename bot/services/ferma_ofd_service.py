@@ -192,33 +192,34 @@ class FermaClient:
 
     # --------------------- public API ---------------------
 
-    async def send_income_receipt(
+    async def send_income_correction_receipt(
         self,
         invoice_id: str,
         amount: float,
         description: str,
+        # --- CorrectionInfo ---
+        correction_type: str,            # "SELF" | "INSPECTION"
+        correction_description: str,     # причина (например, "Ошибочный чек")
+        correction_receipt_date: str,    # строка даты, как требует Ferma (например "17.01.21")
+        correction_receipt_id: str,      # номер/идентификатор чека-основания
+        # --- Покупатель/идентификаторы (опционально) ---
         buyer_email: str | None = None,
         buyer_phone: str | None = None,
         payment_identifiers: str | None = None,
         *,
-        overrides: dict | None = None,              # ← точечные переопределения
+        overrides: dict | None = None,   # те же override-поля, что и для обычного чека
     ) -> dict:
         """
-        Формирует чек прихода (Type='Income') для Ferma Cloud KKT.
-        Все поля берутся из Settings (self.cfg) и могут быть переопределены через overrides.
+        Сформировать чек КОРРЕКЦИИ прихода (Type='IncomeCorrection').
 
-        ДОБАВЛЕНО:
-        - поддержка CustomerReceipt.PaymentItems (тег 1215):
-                [{"PaymentType": 2, "Sum": 50}, ...]
-            где PaymentType:
-            1 — полная предварительная оплата (100%)
-            2 — предварительная оплата (аванс)
-            3 — частичная предварительная оплата
-            4 — полный расчёт
-            5 — частичный расчёт и кредит
-            6 — передача в кредит
-            7 — оплата кредита
-        - поддержка CustomerReceipt.CashlessPayments (для корректного платежного блока)
+        Обязательное: блок CorrectionInfo:
+            - Type: "SELF" (самостоятельная коррекция) или "INSPECTION" (по предписанию)
+            - Description: строковое пояснение
+            - ReceiptDate: строка даты в формате Ferma (например "17.01.21")
+            - ReceiptId: идентификатор/номер исходного ошибочного чека
+
+        Остальные поля аналогичны send_income_receipt: позиция на всю сумму, CashlessPayments и т.п.
+        Возвращает: {"receipt_id": str, "invoice_id": str | None}
         """
         s = get_settings()
         ov = overrides or {}
@@ -233,8 +234,8 @@ class FermaClient:
         taxation = taxation.strip() or None
 
         vat = ov.get("vat", getattr(s, "FERMA_VAT", "VatNo"))
-        payment_type_item = int(ov.get("payment_type", getattr(s, "FERMA_PAYMENT_TYPE", 4)))        # предмет расчёта на позиции
-        payment_method_item = int(ov.get("payment_method", getattr(s, "FERMA_PAYMENT_METHOD", 4)))  # способ расчёта на позиции
+        payment_type_item = int(ov.get("payment_type", getattr(s, "FERMA_PAYMENT_TYPE", 4)))        # предмет расчёта на ПОЗИЦИИ
+        payment_method_item = int(ov.get("payment_method", getattr(s, "FERMA_PAYMENT_METHOD", 4)))  # способ расчёта на ПОЗИЦИИ
         measure = ov.get("measure", getattr(s, "FERMA_MEASURE", "PIECE"))
 
         is_internet = bool(ov.get("is_internet", getattr(s, "FERMA_IS_INTERNET", False)))
@@ -255,23 +256,16 @@ class FermaClient:
             path = getattr(s, "ferma_callback_path", "/webhook/ferma")
             callback_url = f"{base}{path}"
 
-        # --- Платёжный блок (CashlessPayments) ---
-        # Можно переопределить либо целиком (list[dict]), либо суммой `cashless_sum`
-        cashless_block = None
+        # --- CashlessPayments (по умолчанию вся сумма безналом) ---
         if "cashless" in ov and isinstance(ov["cashless"], list) and ov["cashless"]:
             cashless_block = ov["cashless"]
         else:
-            cashless_sum = ov.get("cashless_sum")
-            if cashless_sum is None:
-                # по умолчанию вся сумма безналом
-                cashless_sum = amount
+            cashless_sum = ov.get("cashless_sum", amount)
             try:
                 cashless_sum = float(str(cashless_sum).replace(",", "."))
             except Exception:
                 cashless_sum = amount
-
             add_info = ov.get("cashless_info", "Полная оплата безналичными")
-            # В ферме PaymentMethodFlag: "1" — безнал
             cashless_block = [{
                 "PaymentSum": round(float(cashless_sum), 2),
                 "PaymentMethodFlag": "1",
@@ -279,10 +273,10 @@ class FermaClient:
                 "AdditionalInformation": add_info,
             }]
 
-        # --- Позиции (Items) ---
+        # --- Позиция (на всю сумму) ---
         total = round(float(amount), 2)
         item = {
-            "Label": (description or f"Оплата заказа {invoice_id}")[:128],
+            "Label": (description or f"Коррекция оплаты {invoice_id}")[:128],
             "Price": total,
             "Quantity": 1.0,
             "Amount": total,
@@ -293,11 +287,9 @@ class FermaClient:
         }
         items = [item]
 
-        # --- PaymentItems (тег 1215): перечень оплат по видам (для аванса/зачёта и т.п.)
-        # Подаётся через overrides["payment_items"] = [{"PaymentType": 2, "Sum": 50}, ...]
+        # --- (необязательно) PaymentItems (тег 1215) ---
         payment_items = None
         if "payment_items" in ov:
-            # Нормализуем: Sum -> float
             raw = ov["payment_items"]
             if isinstance(raw, list) and raw:
                 norm: list[dict] = []
@@ -311,11 +303,19 @@ class FermaClient:
                 if norm:
                     payment_items = norm
 
+        # --- CorrectionInfo (ОБЯЗАТЕЛЬНО) ---
+        corr_info = {
+            "Type": correction_type,               # "SELF" | "INSPECTION"
+            "Description": correction_description, # "Ошибочный чек" и т.п.
+            "ReceiptDate": correction_receipt_date,# "17.01.21" (оставляем строкой как требует Ferma)
+            "ReceiptId": correction_receipt_id,    # идентификатор исходного чека
+        }
+
         # --- CustomerReceipt ---
         customer_receipt: dict = {
             "Items": items,
-            "TotalSum": total,                  # не обязательное поле в их примере, но не мешает
-            "CashlessPayments": cashless_block, # важный блок
+            "CashlessPayments": cashless_block,
+            "CorrectionInfo": corr_info,
         }
         if taxation:
             customer_receipt["TaxationSystem"] = taxation
@@ -333,7 +333,7 @@ class FermaClient:
         # --- Корневой Request ---
         request_obj: dict = {
             "Inn": inn,
-            "Type": "Income",
+            "Type": "IncomeCorrection",
             "InvoiceId": invoice_id,
             "CustomerReceipt": customer_receipt,
         }
@@ -341,13 +341,12 @@ class FermaClient:
             request_obj["CallbackUrl"] = callback_url
         if is_internet:
             request_obj["IsInternet"] = True
-        # дублируем идентификатор платежа и в Data (удобно для трейсинга)
         if payment_identifiers:
             request_obj["Data"] = {"PaymentIdentifiers": [payment_identifiers]}
 
         payload = {"Request": request_obj}
 
-        # Вызов Ferma
+        # вызов Ferma
         resp = await self._post_json("/api/kkt/cloud/receipt", payload, use_token=True)
         data = (resp or {}).get("Data") or resp or {}
 
